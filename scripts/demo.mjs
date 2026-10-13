@@ -10,6 +10,7 @@ const folder=mkdtempSync(join(tmpdir(),'opencrm-demo-'));
 process.env.DATABASE_PATH=join(folder,'demo.db');
 process.env.UPLOAD_DIR=join(folder,'uploads');
 process.env.NODE_ENV='test';
+process.env.OPENCRM_WEBHOOK_WORKER='1';
 
 const {app,db}=await import('../server/index.js');
 const upstream=app.listen(0,'127.0.0.1');
@@ -87,7 +88,7 @@ const demo=createServer(async(req,res)=>{
     const chunks=[];for await(const chunk of req)chunks.push(chunk);
     const body=chunks.length?Buffer.concat(chunks):undefined;
     const headers={'Content-Type':req.headers['content-type']||'application/json',Cookie:cookie};
-    for(const key of ['x-file-name','x-file-type','range'])if(req.headers[key])headers[key]=req.headers[key];
+    for(const key of ['x-file-name','x-file-type','range','authorization','idempotency-key'])if(req.headers[key])headers[key]=req.headers[key];
     const response=await fetch(base+req.url,{method:req.method,headers,body,duplex:body?'half':undefined});
     res.statusCode=response.status;
     for(const key of ['content-type','cache-control','content-disposition','content-range']){const value=response.headers.get(key);if(value)res.setHeader(key,value)}

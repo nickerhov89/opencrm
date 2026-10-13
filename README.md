@@ -2,7 +2,7 @@
 
 **A self-hosted, open-source CRM for small sales teams.** Track a lead from the first request to a won or lost deal, with contacts, companies, tasks, and a customizable pipeline in one place.
 
-[Русская документация](README.ru.md) · [MVP scope](docs/MVP_SPEC.md) · [Contributing](CONTRIBUTING.md)
+[Русская документация](README.ru.md) · [API and webhooks](docs/INTEGRATIONS.md) · [MVP scope](docs/MVP_SPEC.md) · [Contributing](CONTRIBUTING.md)
 
 ![OpenCRM pipeline with fictional demo data](docs/board-preview.png)
 
@@ -16,8 +16,9 @@ OpenCRM is an independent project. It is not affiliated with amoCRM and does not
 - Accept leads through a built-in public form, search across records, import/export CSV, and view basic sales reports.
 - Create users with roles and ownership-based visibility; restore deleted records from the trash.
 - Back up the SQLite database and attachments, verify checksums, and restore into a separate directory.
+- Connect external systems with scoped API keys and signed, retried webhooks for leads and deals.
 
-The application is designed for a team running its own instance. Email, messaging, telephony, and amoCRM synchronization are **not** included in this release; communication records are entered manually and do not send messages.
+The application is designed for a team running its own instance. The [generic API and webhooks](docs/INTEGRATIONS.md) can connect it to other services. Built-in email, messaging, telephony, and amoCRM synchronization are **not** included; communication records are entered manually and do not send messages.
 
 ## Try it locally
 

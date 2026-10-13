@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDb } from './db.js';
 import { parseCsv } from './csv.js';
+import { registerIntegrations } from './integrations.js';
 import {defaultDealCardFields,validDealCardFields} from '../src/deal-card-layout.js';
 
 const app = express();
@@ -743,6 +744,7 @@ app.post('/api/import/:kind.csv',auth,(req,res)=>{
   }return count})();
   res.json({imported,skipped:rows.length-1-imported});
 });
+registerIntegrations(app,db,{auth,admin,event,runStageAutomation});
 app.use(express.static(resolve(root,'dist')));
 app.get('/{*path}',(req,res) => { if (req.path.startsWith('/api/')) return fail(res,404,'Маршрут не найден'); res.sendFile(resolve(root,'dist/index.html')); });
 app.use((err,_req,res,_next) => { console.error(err); fail(res,500,'Ошибка сервера'); });

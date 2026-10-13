@@ -26,6 +26,11 @@ export function createDb(path = process.env.DATABASE_PATH || './data/opencrm.db'
     CREATE TABLE IF NOT EXISTS deal_contacts (deal_id INTEGER NOT NULL REFERENCES deals(id) ON DELETE CASCADE, contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(deal_id,contact_id));
     CREATE TABLE IF NOT EXISTS inbox_leads (id INTEGER PRIMARY KEY, pipeline_id INTEGER NOT NULL REFERENCES pipelines(id), title TEXT NOT NULL, contact_name TEXT NOT NULL DEFAULT '', company_name TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', website TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','accepted','rejected')), deal_id INTEGER REFERENCES deals(id) ON DELETE SET NULL, created_by INTEGER REFERENCES users(id) ON DELETE SET NULL, resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, resolved_at TEXT);
     CREATE TABLE IF NOT EXISTS lead_forms (id INTEGER PRIMARY KEY, pipeline_id INTEGER NOT NULL REFERENCES pipelines(id), title TEXT NOT NULL, token TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL, scopes_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, last_used_at TEXT, revoked_at TEXT);
+    CREATE TABLE IF NOT EXISTS api_idempotency (api_key_id INTEGER NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, lead_id INTEGER NOT NULL REFERENCES inbox_leads(id) ON DELETE CASCADE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(api_key_id,idempotency_key));
+    CREATE TABLE IF NOT EXISTS webhook_endpoints (id INTEGER PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, secret TEXT NOT NULL, events_json TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS webhook_events (id INTEGER PRIMARY KEY, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (id INTEGER PRIMARY KEY, endpoint_id INTEGER NOT NULL REFERENCES webhook_endpoints(id) ON DELETE CASCADE, event_id INTEGER NOT NULL REFERENCES webhook_events(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','delivered','failed')), attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0, locked_until INTEGER, response_status INTEGER, last_error TEXT NOT NULL DEFAULT '', delivered_at TEXT, UNIQUE(endpoint_id,event_id));
     CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, task_type TEXT NOT NULL DEFAULT 'Связаться', due_at TEXT, completed_at TEXT, completion_result TEXT NOT NULL DEFAULT '', deal_id INTEGER REFERENCES deals(id) ON DELETE CASCADE, contact_id INTEGER REFERENCES contacts(id) ON DELETE CASCADE, company_id INTEGER REFERENCES companies(id) ON DELETE CASCADE, owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, deal_id INTEGER NOT NULL REFERENCES deals(id) ON DELETE CASCADE, user_id INTEGER REFERENCES users(id) ON DELETE SET NULL, body TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS deal_communications (id INTEGER PRIMARY KEY, deal_id INTEGER NOT NULL REFERENCES deals(id) ON DELETE CASCADE, user_id INTEGER REFERENCES users(id) ON DELETE SET NULL, kind TEXT NOT NULL CHECK(kind IN ('call','email','message')), direction TEXT NOT NULL CHECK(direction IN ('incoming','outgoing')), subject TEXT NOT NULL DEFAULT '', body TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -40,6 +45,7 @@ export function createDb(path = process.env.DATABASE_PATH || './data/opencrm.db'
     CREATE INDEX IF NOT EXISTS idx_deals_company_live ON deals(company_id,deleted_at);
     CREATE INDEX IF NOT EXISTS idx_deal_contacts_contact ON deal_contacts(contact_id,deal_id);
     CREATE INDEX IF NOT EXISTS idx_inbox_pipeline_status ON inbox_leads(pipeline_id,status,id);
+    CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_due ON webhook_deliveries(status,next_attempt_at,locked_until);
     CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(due_at, completed_at);
     CREATE INDEX IF NOT EXISTS idx_tasks_deal ON tasks(deal_id, completed_at);
     CREATE INDEX IF NOT EXISTS idx_activity_deal ON activity(deal_id, created_at);
@@ -48,6 +54,19 @@ export function createDb(path = process.env.DATABASE_PATH || './data/opencrm.db'
     CREATE INDEX IF NOT EXISTS idx_entity_activity ON entity_activity(entity_type, entity_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_custom_fields_type ON custom_fields(entity_type, sort_order);
     CREATE INDEX IF NOT EXISTS idx_attachments_entity ON attachments(entity_type, entity_id, created_at);
+    CREATE TRIGGER IF NOT EXISTS trg_webhook_delivery_enqueue AFTER INSERT ON webhook_events BEGIN
+      INSERT INTO webhook_deliveries (endpoint_id,event_id)
+      SELECT w.id,NEW.id FROM webhook_endpoints w WHERE w.active=1 AND EXISTS (SELECT 1 FROM json_each(w.events_json) WHERE value=NEW.event_type);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_webhook_lead_created AFTER INSERT ON inbox_leads BEGIN
+      INSERT INTO webhook_events (event_type,payload_json) VALUES ('lead.created',json_object('id',NEW.id,'pipeline_id',NEW.pipeline_id,'title',NEW.title,'contact_name',NEW.contact_name,'company_name',NEW.company_name,'phone',NEW.phone,'email',NEW.email,'source',NEW.source,'status',NEW.status));
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_webhook_deal_created AFTER INSERT ON deals BEGIN
+      INSERT INTO webhook_events (event_type,payload_json) VALUES ('deal.created',json_object('id',NEW.id,'pipeline_id',(SELECT pipeline_id FROM stages WHERE id=NEW.stage_id),'stage_id',NEW.stage_id,'name',NEW.name,'amount',NEW.amount,'owner_id',NEW.owner_id,'source',NEW.source));
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_webhook_deal_stage_changed AFTER UPDATE OF stage_id ON deals WHEN OLD.stage_id<>NEW.stage_id BEGIN
+      INSERT INTO webhook_events (event_type,payload_json) VALUES ('deal.stage_changed',json_object('id',NEW.id,'pipeline_id',(SELECT pipeline_id FROM stages WHERE id=NEW.stage_id),'previous_stage_id',OLD.stage_id,'stage_id',NEW.stage_id,'name',NEW.name,'amount',NEW.amount,'owner_id',NEW.owner_id));
+    END;
   `);
   if(!db.prepare('PRAGMA table_info(deal_card_layouts)').all().some(column=>column.name==='show_avatar'))db.exec('ALTER TABLE deal_card_layouts ADD COLUMN show_avatar INTEGER NOT NULL DEFAULT 1 CHECK(show_avatar IN (0,1))');
   if (!db.prepare('PRAGMA table_info(custom_fields)').all().some(column => column.name === 'options_json')) {

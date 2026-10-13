@@ -6,6 +6,7 @@ services:
       - "127.0.0.1:${OPENCRM_PORT:-3001}:3001"
     environment:
       COOKIE_SECURE: ${COOKIE_SECURE:-0}
+      OPENCRM_WEBHOOK_ALLOWED_HOSTS: ${OPENCRM_WEBHOOK_ALLOWED_HOSTS:-}
     volumes:
       - opencrm_data:/app/data
       - opencrm_backups:/app/backups
