@@ -18,6 +18,7 @@ import SettingsPage from './SettingsPage.jsx';
 import PipelineDesigner from './PipelineDesigner.jsx';
 import InboxPage from './InboxPage.jsx';
 import PublicLeadForm from './PublicLeadForm.jsx';
+import LandingPage from './LandingPage.jsx';
 import './style.css';
 import './deal-list.css';
 import TaskScheduleFields from './TaskScheduleFields.jsx';
@@ -98,6 +99,7 @@ function App(){
   const openSectionSearch=(event,query=search)=>{const rect=event.currentTarget.parentElement.getBoundingClientRect();const width=Math.min(640,window.innerWidth-24,Math.max(320,window.innerWidth-rect.left-12));setGlobalSearch({section:view,query,anchor:{left:Math.max(12,Math.min(rect.left,window.innerWidth-width-12)),top:rect.bottom+8,width}})};
   const formToken=window.location.pathname.slice(appBase.length).match(/^\/forms\/([a-f0-9]{48})\/?$/)?.[1];
   if(formToken)return <PublicLeadForm api={api} token={formToken}/>;
+  if((window.location.pathname.replace(/\/$/, '') || '/') === (appBase || '/'))return <LandingPage/>;
   if(loading)return <div className="center-load">Загружаем OpenCRM…</div>;
   if(!auth)return <Auth setup={setup} onAuth={user=>{setAuth(user);setSetup(false)}} onError={message}/>;
   const nav=[['dashboard',LayoutDashboard,'Рабочий стол'],['deals',KanbanSquare,'Сделки'],['tasks',CheckCircle2,'Задачи'],['lists',UsersRound,'Списки'],...((auth.role==='admin'||auth.deal_access!=='own'&&auth.task_access!=='own')?[['analytics',BarChart3,'Аналитика']]:[]),['settings',Settings,'Настройки']];
