@@ -1,0 +1,8 @@
+.deal-csv-more{display:none;position:relative}
+.deal-csv-more summary{display:grid;place-items:center;width:32px;height:34px;list-style:none;color:#7b8b97;cursor:pointer}
+.deal-csv-more summary::-webkit-details-marker{display:none}
+.deal-csv-more[open] summary{color:#4a87be;background:#edf5fc}
+.deal-csv-more>div{position:absolute;z-index:35;right:0;top:38px;min-width:160px;padding:4px;background:#fff;border:1px solid #dce3e8;box-shadow:0 5px 18px #1b34422c}
+.deal-csv-more>div button{display:flex;align-items:center;gap:8px;width:100%;padding:9px 10px;border:0;background:#fff;color:#4c5e6b;font-size:11px;text-align:left;white-space:nowrap}
+.deal-csv-more>div button:hover{background:#f0f6fb}
+@media(max-width:760px){.deal-csv-more{display:block}}

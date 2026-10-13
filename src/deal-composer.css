@@ -1,0 +1,18 @@
+.deal-compose{display:flex;flex-direction:column;align-items:stretch;gap:8px}
+.deal-compose-modes{display:flex;gap:4px;flex-wrap:wrap}
+.deal-compose-modes button{border:0;background:transparent;color:#86939d;font-size:11px;padding:5px 8px;border-radius:2px}
+.deal-compose-modes button.active{background:#e9f2fb;color:#427eaf;font-weight:700}
+.deal-compose-modes button:hover{color:#427eaf}
+.deal-compose-meta{display:flex;gap:9px;align-items:end}
+.deal-compose-meta label{display:flex;flex-direction:column;gap:3px;color:#7e8c97;font-size:10px}
+.deal-compose-meta select,.deal-compose-meta input{height:30px;border:1px solid #d5dadd;border-radius:2px;background:#fff;color:#35424e;padding:4px 7px;font-size:11px}
+.deal-compose-meta .deal-compose-subject{flex:1;min-width:0}
+.deal-compose-entry{display:flex;gap:10px;align-items:end}
+.deal-compose-entry textarea{min-width:0}
+.deal-compose-entry .blue-btn{flex:0 0 auto}
+.deal-compose>small{font-size:10px;color:#98a4ad}
+.deal-communication{border-left:3px solid #8bb8df!important}
+.deal-communication .timeline-icon{border-color:#9bc3e5;color:#4e89b8}
+.deal-communication strong{display:block;font-size:11px;color:#55738c;margin-top:3px}
+.deal-communication p{overflow-wrap:anywhere}
+@media(max-width:650px){.deal-compose-entry{align-items:stretch}.deal-compose-entry .blue-btn{align-self:end}.deal-compose-meta{flex-wrap:wrap}.deal-compose-meta .deal-compose-subject{flex-basis:100%}}

@@ -1,0 +1,11 @@
+.deal-detail .timeline-head{padding:0 20px;gap:14px}
+.deal-timeline-search{position:relative;display:flex;align-items:center;gap:8px;flex:1;min-width:0;color:#a0a8ae}
+.deal-timeline-search input{border:0;box-shadow:none!important;width:100%;min-width:0;color:#4d5962;font-size:12px;background:transparent}
+.deal-timeline-search input::placeholder{color:#afb7bc}
+.deal-timeline-search>button{white-space:nowrap;color:#98a4ac!important}
+.deal-timeline-search>button.selected{color:#4d82bb!important}
+.deal-timeline-filter{position:absolute;z-index:8;top:32px;right:0;min-width:155px;padding:5px;background:#fff;border:1px solid #d9e0e5;box-shadow:0 5px 16px #25394827}
+.deal-timeline-filter button{width:100%;padding:8px 11px!important;color:#5f6d77!important;text-align:left;display:block!important}
+.deal-timeline-filter button:hover,.deal-timeline-filter button.selected{background:#eff5fb!important;color:#4b82b8!important}
+.deal-timeline-add{white-space:nowrap}
+.deal-timeline-empty{text-align:center;color:#9aa5ad;font-size:12px;margin:auto;padding:30px}

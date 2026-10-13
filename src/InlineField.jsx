@@ -1,0 +1,10 @@
+import React, {useEffect, useState} from 'react';
+import {Check, ChevronDown, X} from 'lucide-react';
+import './deal-page.css';
+
+export default function InlineField({label,value,display,options,type='text',onSave,onOpen}){
+  const [editing,setEditing]=useState(false),[draft,setDraft]=useState(String(value??'')),[busy,setBusy]=useState(false);
+  useEffect(()=>{if(!editing)setDraft(String(value??''))},[value,editing]);
+  const save=async()=>{if(busy)return;setBusy(true);try{const next=type==='number'?Number(draft)||0:type==='select'?Number(draft)||null:draft;const ok=await onSave(next);if(ok!==false)setEditing(false)}finally{setBusy(false)}};
+  return <div className={'deal-inline-row '+(editing?'editing':'')}><span className="deal-inline-label">{label}</span><div className="deal-inline-value">{editing?<div className="deal-inline-editor">{options?<select autoFocus value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>{if(e.key==='Escape')setEditing(false);if(e.key==='Enter')save()}}><option value="">—</option>{options.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}</select>:type==='textarea'?<textarea autoFocus value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>{if(e.key==='Escape')setEditing(false);if(e.key==='Enter'&&e.ctrlKey)save()}}/>:<input autoFocus type={type==='number'?'number':'text'} min={type==='number'?0:undefined} value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>{if(e.key==='Escape')setEditing(false);if(e.key==='Enter'){e.preventDefault();save()}}}/>}<button aria-label={`Сохранить ${label}`} onClick={save} disabled={busy}><Check size={15}/></button><button aria-label={`Отменить ${label}`} onClick={()=>setEditing(false)}><X size={14}/></button></div>:<div className="deal-inline-display"><button className="deal-inline-text" onClick={()=>setEditing(true)} title={`Изменить: ${label}`}>{(display??value)||'…'}</button>{onOpen&&value&&<button className="deal-inline-open" onClick={onOpen} title="Открыть карточку"><ChevronDown size={15}/></button>}</div>}</div></div>;
+}

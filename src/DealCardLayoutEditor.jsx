@@ -1,0 +1,14 @@
+import React,{useEffect,useState} from 'react';
+import {ArrowDown,ArrowUp,X} from 'lucide-react';
+import {dealCardFieldOptions,defaultDealCardFields} from './deal-card-layout.js';
+import './deal-card-layout.css';
+
+export default function DealCardLayoutEditor({pipelineName,fields,showAvatar=true,customFields=[],onClose,onSave}){
+  const [draft,setDraft]=useState(fields),[avatar,setAvatar]=useState(showAvatar),[saving,setSaving]=useState(false);
+  useEffect(()=>{setDraft(fields);setAvatar(showAvatar)},[fields,showAvatar]);
+  const options=[...dealCardFieldOptions,...customFields.filter(field=>field.entity_type==='deal').map(field=>[`field:${field.id}`,`Поле · ${field.name}`])];
+  const label=key=>options.find(([option])=>option===key)?.[1]||key;
+  const move=(index,direction)=>setDraft(current=>{const next=[...current],other=index+direction;if(other<0||other>=next.length)return current;[next[index],next[other]]=[next[other],next[index]];return next});
+  const toggle=key=>setDraft(current=>current.includes(key)?current.length>1?current.filter(item=>item!==key):current:current.length<7?[...current,key]:current);
+  return <><button className="deal-card-layout-scrim" aria-label="Закрыть настройку карточки" onClick={onClose}/><section className="deal-card-layout-panel" aria-label="Внешний вид карточки"><header><div><h2>Внешний вид карточки</h2><p>{pipelineName||'Текущая воронка'}</p></div><button aria-label="Закрыть" onClick={onClose}><X size={18}/></button></header><div className="deal-card-layout-body"><p>Выберите до 7 полей и расположите их в нужном порядке. Название сделки показывается всегда.</p><label className="deal-card-avatar-option"><input type="checkbox" checked={avatar} onChange={event=>setAvatar(event.target.checked)}/> Показывать аватар контакта</label><h3>ПОЛЯ НА КАРТОЧКЕ</h3>{draft.map((key,index)=><div className="deal-card-layout-row" key={key}><span>{index+1}. {label(key)}</span><button aria-label={`Поднять ${label(key)}`} disabled={index===0} onClick={()=>move(index,-1)}><ArrowUp size={15}/></button><button aria-label={`Опустить ${label(key)}`} disabled={index===draft.length-1} onClick={()=>move(index,1)}><ArrowDown size={15}/></button><button aria-label={`Убрать ${label(key)}`} disabled={draft.length===1} onClick={()=>toggle(key)}><X size={15}/></button></div>)}<h3>ДОБАВИТЬ ПОЛЕ</h3><div className="deal-card-layout-add">{options.filter(([key])=>!draft.includes(key)).map(([key,title])=><button key={key} disabled={draft.length>=7} onClick={()=>toggle(key)}>+ {title}</button>)}</div></div><footer><button onClick={()=>{setDraft(defaultDealCardFields);setAvatar(true)}}>По умолчанию</button><button className="blue-btn" disabled={saving} onClick={async()=>{setSaving(true);try{await onSave({fields:draft,showAvatar:avatar})}finally{setSaving(false)}}}>Сохранить</button></footer></section></>;
+}

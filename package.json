@@ -1,0 +1,31 @@
+{
+  "name": "opencrm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k \"node --env-file-if-exists=.env --watch server/index.js\" \"vite --host 127.0.0.1\"",
+    "build": "vite build",
+    "start": "NODE_ENV=production node --env-file-if-exists=.env server/index.js",
+    "demo": "node scripts/demo.mjs",
+    "backup": "node --env-file-if-exists=.env scripts/backup.mjs create",
+    "backup:verify": "node scripts/backup.mjs verify",
+    "backup:restore": "node --env-file-if-exists=.env scripts/backup.mjs restore",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "express": "^5.1.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "vite": "^7.3.0"
+  }
+}

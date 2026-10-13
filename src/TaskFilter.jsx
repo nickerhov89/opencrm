@@ -1,0 +1,15 @@
+import React,{useEffect,useMemo,useState} from 'react';
+import {CalendarDays,RotateCcw,X} from 'lucide-react';
+import {emptyTaskFilter} from './task-filter.js';
+import './task-filter.css';
+
+const presets=[['mine','Только мои задачи','open'],['overdue','Просроченные задачи','open'],['completed','Выполненные задачи','done'],['all','Все задачи','all']];
+
+export default function TaskFilter({filter,state,tasks,users,onApply,onReset,onClose}){
+  const [draft,setDraft]=useState(filter),[draftState,setDraftState]=useState(state);
+  useEffect(()=>{setDraft(filter);setDraftState(state)},[filter,state]);
+  const types=useMemo(()=>[...new Set(tasks.map(task=>task.task_type||'Связаться'))].sort((a,b)=>a.localeCompare(b,'ru')),[tasks]);
+  const set=(key,value)=>setDraft(current=>({...current,[key]:value}));
+  const choosePreset=(preset,nextState)=>{const next={...emptyTaskFilter,preset:['mine','overdue'].includes(preset)?preset:''};setDraft(next);setDraftState(nextState);onApply(next,nextState)};
+  return <><button className="task-filter-scrim" aria-label="Закрыть фильтр задач" onClick={onClose}/><section className="task-filter" aria-label="Фильтр задач"><div className="task-filter-columns"><div className="task-filter-presets"><h3>БЫСТРЫЕ ФИЛЬТРЫ</h3>{presets.map(([key,label,nextState])=><button key={key} className={(draft.preset===key||!draft.preset&&((key==='completed'&&draftState==='done')||(key==='all'&&draftState==='all')))?'selected':''} onClick={()=>choosePreset(key,nextState)}><i className={'task-filter-dot '+key}/>{label}</button>)}</div><div className="task-filter-properties"><h3>СВОЙСТВА ЗАДАЧ</h3><label>Статус<select value={draftState} onChange={event=>setDraftState(event.target.value)}><option value="open">Активные</option><option value="done">Выполненные</option><option value="all">Все</option></select></label><label>Срок<div className="task-filter-date-pair"><CalendarDays size={15}/><input type="date" value={draft.dueFrom} max={draft.dueTo||undefined} aria-label="Срок с" onChange={event=>set('dueFrom',event.target.value)}/><span>—</span><input type="date" value={draft.dueTo} min={draft.dueFrom||undefined} aria-label="Срок до" onChange={event=>set('dueTo',event.target.value)}/></div></label><label>Тип задачи<select value={draft.type} onChange={event=>set('type',event.target.value)}><option value="">Все типы</option>{types.map(type=><option key={type} value={type}>{type}</option>)}</select></label><label>Менеджер<select value={draft.owner} onChange={event=>set('owner',event.target.value)}><option value="">Все менеджеры</option>{users.map(user=><option key={user.id} value={user.id}>{user.name}</option>)}</select></label></div></div><footer className="task-filter-actions"><button onClick={()=>{setDraft(emptyTaskFilter);setDraftState('open');onReset()}}><RotateCcw size={14}/> Сбросить</button><button onClick={onClose}><X size={15}/> Закрыть</button><button className="blue-btn" onClick={()=>onApply(draft,draftState)}>Применить</button></footer></section></>;
+}

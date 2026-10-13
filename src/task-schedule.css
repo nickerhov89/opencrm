@@ -1,0 +1,8 @@
+.task-schedule-fields{display:grid;gap:12px;border:1px solid #e0e5e8;background:#f9fafb;padding:13px;border-radius:3px}
+.task-schedule-fields>label{display:flex;flex-direction:column;gap:5px;color:#657480;font-size:12px}
+.task-schedule-fields input[type=date],.task-schedule-fields input[type=time]{height:35px;border:1px solid #d3dce2;border-radius:2px;background:#fff;padding:6px 8px;color:#33434f;font-size:12px}
+.task-schedule-fields .task-all-day{flex-direction:row;align-items:center;gap:8px;cursor:pointer}
+.task-schedule-fields .task-all-day input{width:15px;height:15px;accent-color:#6a9ad2}
+.task-time-range{display:flex;align-items:end;gap:9px}
+.task-time-range label{display:flex;flex-direction:column;gap:5px;flex:1;color:#657480;font-size:12px}
+.task-time-range span{padding-bottom:8px;color:#9aa4ab}

@@ -1,0 +1,32 @@
+.entity-detail .detail-hero{min-height:0;padding-bottom:0}
+.entity-detail .detail-heading h1{cursor:text}
+.entity-detail .detail-heading h1:hover{color:#d5e9fa}
+.entity-detail .detail-id{margin-bottom:17px}
+.entity-detail .detail-id:has(+ .entity-quick-actions){margin-bottom:9px}
+.entity-quick-actions{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:15px}
+.entity-quick-actions a{display:inline-flex;align-items:center;gap:6px;min-height:27px;padding:4px 9px;border:1px solid #718ba1;border-radius:3px;color:#dbe9f5;text-decoration:none;font-size:11px;font-weight:600}
+.entity-quick-actions a:hover,.entity-quick-actions a:focus-visible{border-color:#c9e1f4;background:#36566f;color:#fff}
+.entity-detail .deal-inline-fields{padding-top:16px}
+.entity-detail .deal-inline-row{grid-template-columns:125px minmax(0,1fr)}
+.entity-detail .deal-inline-text{white-space:pre-wrap}
+.entity-detail .detail-fields .field-row{margin-top:7px}
+@media(max-width:760px){.entity-detail .deal-inline-row{grid-template-columns:105px minmax(0,1fr)}}
+
+.entity-header-tags{margin-left:9px;color:#95aabb;font-size:11px;font-weight:400}
+.entity-history{display:flex;flex-direction:column;gap:8px;padding-bottom:18px}
+.entity-history-day{text-align:center;color:#a5adb3;font-size:10px;margin:7px 0 1px}
+.entity-history-event{display:flex;gap:9px;align-items:flex-start;color:#98a2a9;font-size:11px;padding:4px 9px}
+.entity-history-event svg{flex:0 0 14px;margin-top:1px}
+.entity-history-event small,.entity-history-note small,.entity-task small{color:#9aa5ac;font-size:10px;font-weight:400}
+.entity-history-event p{margin:3px 0 0;line-height:1.4;color:#687781;overflow-wrap:anywhere}
+.entity-history-note{flex-shrink:0}
+.entity-task.completed svg{color:#83bb8c}
+.entity-task>span{display:flex;flex-direction:column;gap:3px;min-width:0}
+.entity-task b{font-weight:600;color:#4f606b}
+.entity-task em{font-style:normal;color:#7d909c;font-size:10px}
+.entity-task{width:100%;text-align:left;cursor:pointer}
+.entity-task:hover{border-color:#91b9d8;background:#fbfdff}
+.entity-deals-tab{padding:19px 22px;display:flex;flex-direction:column;gap:8px}
+.entity-deals-tab h2{font-size:11px;color:#82909a;margin:0 0 5px;text-transform:uppercase}
+.entity-deals-tab p{color:#9ca8af;font-size:11px}
+.entity-upcoming-deal{font-style:normal;text-decoration:underline;color:#667e8e;white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis}

@@ -1,0 +1,12 @@
+.quick-deal-form{border:1px dashed #bfc4c8;background:#f9f9f9;padding:9px;margin-bottom:6px;display:flex;flex-direction:column;gap:7px}
+.quick-deal-form>input,.quick-deal-group{width:100%;background:#fff;border:1px solid #e1e4e6;border-radius:2px}
+.quick-deal-form>input{height:35px;padding:6px 8px;color:#424950;font-size:12px}
+.quick-deal-form>input::placeholder,.quick-deal-group input::placeholder{color:#a6adb2}
+.quick-deal-group{display:flex;flex-direction:column;padding:4px 0}
+.quick-deal-group input{width:100%;height:28px;border:0;padding:4px 8px;background:#fff;color:#424950;font-size:11px}
+.quick-deal-group input:focus{box-shadow:none!important;background:#f8fbff}
+.quick-deal-actions{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.quick-deal-actions button{border:0;background:none;color:#89949c;font-size:11px;padding:6px 3px}
+.quick-deal-actions .quick-deal-submit{background:#5b91e5;border:1px solid #4c86dc;color:#fff;font-weight:700;padding:6px 10px;border-radius:2px}
+.quick-deal-actions .quick-deal-submit:hover{background:#4d81cf}
+.quick-deal-actions .quick-deal-settings{margin-left:auto;color:#a2aab0}

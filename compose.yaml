@@ -1,0 +1,16 @@
+services:
+  opencrm:
+    build: .
+    image: opencrm:local
+    ports:
+      - "127.0.0.1:${OPENCRM_PORT:-3001}:3001"
+    environment:
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+    volumes:
+      - opencrm_data:/app/data
+      - opencrm_backups:/app/backups
+    restart: unless-stopped
+
+volumes:
+  opencrm_data:
+  opencrm_backups:

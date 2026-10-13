@@ -1,0 +1,22 @@
+.task-result-backdrop{position:fixed;inset:0;z-index:70;background:#12283a80;display:grid;place-items:center;padding:20px}
+.task-result-dialog{width:min(710px,100%);background:#f8f8f9;border:1px solid #dfe3e6;box-shadow:0 15px 45px #14273555;padding:27px 30px 20px;color:#53616c}
+.task-result-top{display:flex;gap:5px;align-items:center;font-size:12px;margin-bottom:12px;overflow:hidden}
+.task-result-link{border:0;background:none;color:#4b83b9;padding:0;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:80%}
+.task-result-top span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.task-result-summary{font-size:12px;margin:0 0 17px;color:#68757e;line-height:1.45}
+.task-result-summary time{color:#d98787}
+.task-result-summary b{font-weight:700;color:#56636d;margin-left:8px}
+.task-result-dialog form{display:flex;gap:10px}
+.task-result-dialog input{height:39px;flex:1;min-width:0;border:1px solid #cbd2d7;border-radius:3px;background:#fff;padding:9px 10px;font-size:12px}
+.task-result-dialog form button{background:#aeb5ba;border:0;color:#fff;border-radius:3px;font-size:12px;font-weight:700;padding:0 18px}
+.task-result-dialog form button:not(:disabled){background:#5c94dc}
+.task-result-completed{background:#fff;border:1px solid #dce2e5;padding:14px 15px;font-size:12px}
+.task-result-completed strong{color:#929ca4;font-size:10px;text-transform:uppercase;letter-spacing:.4px}
+.task-result-completed p{white-space:pre-wrap;color:#4f5d67;margin:8px 0 15px}
+.task-result-completed button{border:0;background:none;color:#4e83b4;font-size:11px;padding:0}
+.task-result-foot{margin-top:16px;display:flex;justify-content:flex-end;gap:15px}
+.task-result-foot button{border:0;background:none;color:#7990a0;font-size:11px;padding:0}
+.task-result-foot button:hover{color:#3f7eb8}
+.task-result-foot .task-result-delete{margin-right:auto;color:#bd6770;display:flex;align-items:center;gap:5px}
+.task-result-foot .task-result-delete:hover{color:#a6444f}
+@media(max-width:600px){.task-result-dialog{padding:20px}.task-result-dialog form{flex-direction:column}.task-result-dialog form button{height:38px}}
