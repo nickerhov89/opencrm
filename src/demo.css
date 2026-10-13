@@ -1,0 +1,3 @@
+.demo-promo{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:9px 20px;background:#172a38;color:#ecf4f7;font-size:12px;line-height:1.4}
+.demo-promo a{color:#9ae7ad;font-weight:700;text-decoration:none;white-space:nowrap}
+.demo-promo a:hover{text-decoration:underline}

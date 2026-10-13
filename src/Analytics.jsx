@@ -1,6 +1,7 @@
 import React, {useEffect, useMemo, useState} from 'react';
 import {ChevronDown, ChevronRight, Filter, Menu, RefreshCw} from 'lucide-react';
 import './analytics.css';
+import {appPath} from './app-base.js';
 
 const money=n=>new Intl.NumberFormat('ru-RU').format(Number(n)||0)+' ₽';
 const num=n=>new Intl.NumberFormat('ru-RU').format(Number(n)||0);
@@ -25,7 +26,7 @@ function Trend({rows,from,to,unit}){
 export default function Analytics({pipeline,pipelines,onPipeline,onDeal,onMenu}){
   const now=new Date(),initial=new Date(now);initial.setDate(initial.getDate()-29);
   const [tab,setTab]=useState('pipeline'),[from,setFrom]=useState(iso(initial)),[to,setTo]=useState(iso(now)),[unit,setUnit]=useState('day'),[basis,setBasis]=useState('count'),[scope,setScope]=useState('all'),[report,setReport]=useState(null),[error,setError]=useState(''),[loading,setLoading]=useState(false),[revision,setRevision]=useState(0);
-  useEffect(()=>{if(!pipeline)return;const controller=new AbortController();setLoading(true);setError('');fetch(`/api/analytics?pipeline_id=${pipeline}&from=${from}&to=${to}`,{signal:controller.signal}).then(async response=>{const body=await response.json();if(!response.ok)throw new Error(body.error||'Ошибка аналитики');return body}).then(setReport).catch(e=>{if(e.name!=='AbortError')setError(e.message)}).finally(()=>{if(!controller.signal.aborted)setLoading(false)});return()=>controller.abort()},[pipeline,from,to,revision]);
+  useEffect(()=>{if(!pipeline)return;const controller=new AbortController();setLoading(true);setError('');fetch(appPath(`/api/analytics?pipeline_id=${pipeline}&from=${from}&to=${to}`),{signal:controller.signal}).then(async response=>{const body=await response.json();if(!response.ok)throw new Error(body.error||'Ошибка аналитики');return body}).then(setReport).catch(e=>{if(e.name!=='AbortError')setError(e.message)}).finally(()=>{if(!controller.signal.aborted)setLoading(false)});return()=>controller.abort()},[pipeline,from,to,revision]);
   const stages=report?.stages||[],filteredStages=stages.filter(s=>scope==='all'||(scope==='active'?s.kind==='active':s.kind!=='active'));
   const max=Math.max(1,...filteredStages.map(s=>basis==='count'?s.count:s.amount));
   const totals=Object.fromEntries(['active','won','lost'].map(kind=>[kind,stages.filter(s=>s.kind===kind).reduce((acc,s)=>({count:acc.count+s.count,amount:acc.amount+s.amount}),{count:0,amount:0})]));

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 — 2026-10-13
+
+Added a read-only public demo mode with fictional data, a Polza Agency link, and support for hosting the frontend under a path prefix. Local development can proxy API requests to a separately running demo via `OPENCRM_DEV_API_TARGET`.
+
 ## 0.2.0 — 2026-10-13
 
 Added scoped API keys, a versioned server-to-server API for leads, pipelines, and deals, idempotent lead creation, and signed outgoing webhooks for new leads and deal changes. Webhook delivery uses a persistent retry queue with an admin-facing log and test action. Added integration settings and documentation.

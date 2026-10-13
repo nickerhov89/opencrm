@@ -85,6 +85,11 @@ try{await seed()}catch(error){upstream.closeAllConnections();upstream.close();db
 
 const demo=createServer(async(req,res)=>{
   try{
+    if(process.env.PUBLIC_DEMO_READ_ONLY==='1'&&!['GET','HEAD'].includes(req.method)){
+      res.writeHead(405,{'Content-Type':'application/json; charset=utf-8','Allow':'GET, HEAD','Cache-Control':'no-store'});
+      res.end(JSON.stringify({error:'Публичное демо доступно только для просмотра'}));
+      return;
+    }
     const chunks=[];for await(const chunk of req)chunks.push(chunk);
     const body=chunks.length?Buffer.concat(chunks):undefined;
     const headers={'Content-Type':req.headers['content-type']||'application/json',Cookie:cookie};
@@ -97,7 +102,8 @@ const demo=createServer(async(req,res)=>{
 });
 
 const port=Number(process.env.DEMO_PORT)||3002;
-demo.listen(port,'127.0.0.1',()=>console.log(`OpenCRM демо: http://127.0.0.1:${port} (только вымышленные данные)`));
+const host=process.env.DEMO_HOST||'127.0.0.1';
+demo.listen(port,host,()=>console.log(`OpenCRM демо: http://${host}:${port} (только вымышленные данные)`));
 const shutdown=()=>{demo.closeAllConnections();demo.close();upstream.closeAllConnections();upstream.close();db.close();rmSync(folder,{recursive:true,force:true});process.exit(0)};
 process.once('SIGINT',shutdown);
 process.once('SIGTERM',shutdown);

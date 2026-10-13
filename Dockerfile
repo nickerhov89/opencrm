@@ -1,5 +1,8 @@
 FROM node:24-bookworm-slim AS build
 
+ARG OPENCRM_BASE_PATH=/
+ARG VITE_PUBLIC_DEMO=0
+ENV OPENCRM_BASE_PATH=${OPENCRM_BASE_PATH} VITE_PUBLIC_DEMO=${VITE_PUBLIC_DEMO}
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./

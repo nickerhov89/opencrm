@@ -34,6 +34,8 @@ npm run demo
 
 Open [http://127.0.0.1:3002](http://127.0.0.1:3002). The demo uses fictional data in a temporary database and leaves your regular database untouched.
 
+For a public, read-only demo under an existing website path, see [the public demo guide](docs/PUBLIC_DEMO.md).
+
 For a persistent installation, run `npm start` after building and open [http://127.0.0.1:3001](http://127.0.0.1:3001). The first visit asks you to create an administrator. SQLite data and uploads live under `data/` by default. Use `.env.example` to configure paths, host, or port. For development, run `npm run dev` and open [http://127.0.0.1:5173](http://127.0.0.1:5173).
 
 You can also use Docker Compose:
