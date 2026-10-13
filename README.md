@@ -4,6 +4,8 @@
 
 [Русская документация](README.ru.md) · [API and webhooks](docs/INTEGRATIONS.md) · [MVP scope](docs/MVP_SPEC.md) · [Contributing](CONTRIBUTING.md)
 
+**[Try the live demo on Polza Agency](https://polzaagency.ru/opencrm)** — browse the real interface with fictional data. The public demo is read-only; local demos can be edited.
+
 ![OpenCRM pipeline with fictional demo data](docs/board-preview.png)
 
 OpenCRM is an independent project. It is not affiliated with amoCRM and does not use its code, logo, API, or customer data. **The current interface is in Russian.**
