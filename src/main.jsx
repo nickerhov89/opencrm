@@ -139,6 +139,10 @@ function App(){
       {view==='pipeline-settings'&&<PipelineDesigner auth={auth} pipeline={pipeline} pipelines={pipelines} stages={stages} deals={deals} api={api} onError={message} onBack={()=>go('deals')} onSelectPipeline={id=>refresh(id)} onEditPipeline={p=>{setEditing(p);setModal('pipeline')}} onEditStage={stage=>{setEditing(stage);setModal('stage')}} onAddStage={()=>{setEditing({pipeline_id:pipeline});setModal('stage')}} onRefresh={refresh}/>}
       {view==='settings'&&<SettingsPage auth={auth} users={users} groups={groups} pipelines={pipelines} pipeline={pipeline} stages={stages} customFields={customFields} api={api} onError={message} onAccountChange={setAccountName} onRefresh={refresh} onMenu={()=>setMobileMenu(!mobileMenu)} onAddCustomField={()=>{setEditing(null);setModal('customField')}} onEditCustomField={f=>{setEditing(f);setModal('customField')}} onAddUser={()=>{setEditing(null);setModal('user')}} onEditUser={u=>{setEditing(u);setModal('user')}} onAddPipeline={()=>{setEditing(null);setModal('pipeline')}} onEditPipeline={p=>{setEditing(p);setModal('pipeline')}} onAddStage={id=>{setEditing({pipeline_id:id||pipeline});setModal('stage')}} onEditStage={s=>{setEditing(s);setModal('stage')}} onLogout={async()=>{await api('/logout',{method:'POST'});setAuth(null)}}/>}
       </>}
+      <footer className="crm-footer">
+        <a href="https://polzaagency.ru/#contact" target="_blank" rel="noopener noreferrer"><strong>Нужны клиенты B2B?</strong> Polza Agency поможет наполнить воронку <span aria-hidden="true">↗</span></a>
+        <a href="https://www.instagram.com/sorichev/" target="_blank" rel="noopener noreferrer" aria-label="Instagram Никиты Соричева">Instagram Никиты ↗</a>
+      </footer>
     </main>
     {error&&<div className="toast" role="alert">{error}<button onClick={()=>setError('')}><X size={15}/></button></div>}
     {globalSearch&&<GlobalSearch api={api} initialQuery={globalSearch.query} section={globalSearch.section} anchor={globalSearch.anchor} onSectionSearch={query=>{setSearch(query);setGlobalSearch(null)}} onClose={()=>setGlobalSearch(null)} onOpenDeal={openDeal} onOpenEntity={openEntity} onError={message}/>}
