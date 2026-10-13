@@ -85,13 +85,25 @@ try{await seed()}catch(error){upstream.closeAllConnections();upstream.close();db
 
 const demo=createServer(async(req,res)=>{
   try{
+    res.setHeader('X-Content-Type-Options','nosniff');
+    res.setHeader('Referrer-Policy','strict-origin-when-cross-origin');
     if(process.env.PUBLIC_DEMO_READ_ONLY==='1'&&!['GET','HEAD'].includes(req.method)){
       res.writeHead(405,{'Content-Type':'application/json; charset=utf-8','Allow':'GET, HEAD','Cache-Control':'no-store'});
       res.end(JSON.stringify({error:'Публичное демо доступно только для просмотра'}));
       return;
     }
-    const chunks=[];for await(const chunk of req)chunks.push(chunk);
-    const body=chunks.length?Buffer.concat(chunks):undefined;
+    if(['GET','HEAD'].includes(req.method)&&Number(req.headers['content-length']||0)>0){
+      res.writeHead(413,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});
+      res.end(JSON.stringify({error:'Тело запроса не поддерживается'}));
+      return;
+    }
+    let body;
+    if(['GET','HEAD'].includes(req.method))req.resume();
+    else{
+      const chunks=[];let length=0;
+      for await(const chunk of req){length+=chunk.length;if(length>16*1024*1024){res.writeHead(413).end();return}chunks.push(chunk)}
+      if(chunks.length)body=Buffer.concat(chunks);
+    }
     const headers={'Content-Type':req.headers['content-type']||'application/json',Cookie:cookie};
     for(const key of ['x-file-name','x-file-type','range','authorization','idempotency-key'])if(req.headers[key])headers[key]=req.headers[key];
     const response=await fetch(base+req.url,{method:req.method,headers,body,duplex:body?'half':undefined});

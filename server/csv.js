@@ -14,3 +14,9 @@ export function parseCsv(input) {
   row.push(field);if(row.some(x=>x.trim()))rows.push(row);
   return rows;
 }
+
+export function quoteCsvCell(input) {
+  const text=String(input??'');
+  const safe=/^[\s\uFEFF]*[=+\-@]/u.test(text)?`'${text.trimStart()}`:text;
+  return `"${safe.replaceAll('"','""')}"`;
+}

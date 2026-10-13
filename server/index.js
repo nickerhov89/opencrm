@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDb } from './db.js';
-import { parseCsv } from './csv.js';
+import { parseCsv, quoteCsvCell } from './csv.js';
 import { registerIntegrations } from './integrations.js';
 import {defaultDealCardFields,validDealCardFields} from '../src/deal-card-layout.js';
 
@@ -16,12 +16,32 @@ const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const uploadDir = resolve(process.env.UPLOAD_DIR || resolve(root,'data/uploads'));
 mkdirSync(uploadDir,{recursive:true});
 app.disable('x-powered-by');
+app.use((req,res,next)=>{
+  res.set('X-Content-Type-Options','nosniff');
+  res.set('Referrer-Policy','strict-origin-when-cross-origin');
+  if(req.path.startsWith('/api/'))res.set('Cache-Control','no-store');
+  if(!req.path.startsWith('/api/')||['GET','HEAD','OPTIONS'].includes(req.method))return next();
+  const origin=req.get('origin'),referer=req.get('referer');
+  const source=origin||referer;
+  if(source){
+    try{if(new URL(source).host!==req.get('host'))return res.status(403).json({error:'Запрос с другого сайта отклонён'})}
+    catch{return res.status(403).json({error:'Неверный Origin'})}
+  }
+  if(['cross-site','same-site'].includes(req.get('sec-fetch-site')))return res.status(403).json({error:'Запрос с другого сайта отклонён'});
+  next();
+});
 app.use(express.json({ limit: '1mb' }));
 
 const fail = (res, code, message) => res.status(code).json({ error: message });
 const hashPassword = password => { const salt = randomBytes(16).toString('hex'); return `${salt}:${scryptSync(password,salt,64).toString('hex')}`; };
 const verifyPassword = (password, stored) => { const [salt, hash] = stored.split(':'); if (!salt || !hash) return false; const computed = scryptSync(password,salt,64); const saved = Buffer.from(hash,'hex'); return saved.length === computed.length && timingSafeEqual(saved,computed); };
 const tokenHash = token => createHash('sha256').update(token).digest('hex');
+const loginFailures=new Map();
+const loginWindowMs=15*60*1000;
+const loginLimit=20;
+const loginKey=email=>tokenHash(email);
+const loginState=email=>{const key=loginKey(email),state=loginFailures.get(key);if(state&&state.until>Date.now())return {key,state};loginFailures.delete(key);return {key,state:null}};
+const recordLoginFailure=(key,state)=>{if(loginFailures.size>=10000){for(const [entry,item] of loginFailures)if(item.until<=Date.now())loginFailures.delete(entry);if(loginFailures.size>=10000)loginFailures.delete(loginFailures.keys().next().value)}const next={count:(state?.count||0)+1,until:state?.until||Date.now()+loginWindowMs};loginFailures.set(key,next);return next};
 const cookies = req => Object.fromEntries((req.headers.cookie || '').split(';').map(part => part.trim().split('=').map(decodeURIComponent)).filter(([k,v]) => k && v));
 const setSession = (res, userId) => { const token = randomBytes(32).toString('hex'); db.prepare('INSERT INTO sessions (token_hash,user_id,expires_at) VALUES (?,?,?)').run(tokenHash(token),userId,Date.now()+30*864e5); res.setHeader('Set-Cookie',`opencrm_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000${process.env.NODE_ENV === 'production' && process.env.COOKIE_SECURE === '1' ? '; Secure' : ''}`); };
 const permissionEntities=['deal','contact','company','task'];
@@ -93,7 +113,7 @@ const dealContactsFor=(req,id)=>db.prepare(`SELECT c.id,c.name,c.position,c.phon
 
 app.get('/api/status', (_req,res) => res.json({ setup: db.prepare('SELECT COUNT(*) n FROM users').get().n === 0 }));
 app.post('/api/setup',(req,res) => { if (db.prepare('SELECT COUNT(*) n FROM users').get().n) return fail(res,409,'Аккаунт уже создан'); const {name,email,password}=req.body; if (!required(name,120)||!required(email,254)||!email.includes('@')||typeof password!=='string'||password.length<10) return fail(res,400,'Укажите имя, email и пароль от 10 символов'); const result=db.prepare('INSERT INTO users (name,email,password_hash,role) VALUES (?,?,?,?)').run(name.trim(),email.trim().toLowerCase(),hashPassword(password),'admin'); setSession(res,result.lastInsertRowid); res.json({id:result.lastInsertRowid,name:name.trim(),email:email.trim().toLowerCase(),role:'admin'}); });
-app.post('/api/login',(req,res) => { const u= db.prepare('SELECT * FROM users WHERE email=?').get(value(req.body.email,254).toLowerCase()); if (!u || typeof req.body.password !== 'string' || !verifyPassword(req.body.password,u.password_hash)) return fail(res,401,'Неверный email или пароль'); setSession(res,u.id); res.json({id:u.id,name:u.name,email:u.email,role:u.role,deal_access:u.deal_access,task_access:u.task_access,contact_access:u.contact_access,company_access:u.company_access,group_id:u.group_id,permissions:parsePermissions(u.permissions_json)}); });
+app.post('/api/login',(req,res) => { const email=value(req.body?.email,254).toLowerCase(),{key,state}=loginState(email);if(state?.count>=loginLimit){res.set('Retry-After',String(Math.ceil((state.until-Date.now())/1000)));return fail(res,429,'Слишком много попыток входа. Повторите позже')}const u=db.prepare('SELECT * FROM users WHERE email=?').get(email);if(!u||typeof req.body?.password!=='string'||req.body.password.length>1024||!verifyPassword(req.body.password,u.password_hash)){recordLoginFailure(key,state);return fail(res,401,'Неверный email или пароль')}loginFailures.delete(key);setSession(res,u.id);res.json({id:u.id,name:u.name,email:u.email,role:u.role,deal_access:u.deal_access,task_access:u.task_access,contact_access:u.contact_access,company_access:u.company_access,group_id:u.group_id,permissions:parsePermissions(u.permissions_json)}); });
 app.post('/api/logout',auth,(req,res) => { db.prepare('DELETE FROM sessions WHERE token_hash=?').run(tokenHash(cookies(req).opencrm_session)); res.setHeader('Set-Cookie','opencrm_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'); res.json({ok:true}); });
 app.get('/api/me',auth,(req,res) => res.json(req.user));
 app.get('/api/search',auth,(req,res)=>{
@@ -673,7 +693,7 @@ app.get('/api/analytics',auth,(req,res) => {
   const contacts=db.prepare('SELECT COUNT(*) n FROM contacts WHERE deleted_at IS NULL AND substr(created_at,1,10) BETWEEN ? AND ?').get(...range).n;
   res.json({from,to,stages:stageRows,created,new_deals:newDeals,people,events,sources,new_contacts:contacts});
 });
-app.get('/api/export/deals.csv',auth,requirePermission('deal','export'),(req,res) => { const rows=db.prepare(`${dealSelect(req)} WHERE d.deleted_at IS NULL AND (?=0 OR d.owner_id=?) ORDER BY d.id`).all(ownDeals(req)?1:0,req.user.id); const fields=['id','name','stage_name','loss_reason','amount','company_name','contact_name','owner_name','source','tags','description']; const quote=s=>`"${String(s??'').replaceAll('"','""')}"`; res.type('text/csv; charset=utf-8').set('Content-Disposition','attachment; filename="deals.csv"').send('\uFEFF'+[fields.join(','),...rows.map(r=>fields.map(f=>quote(r[f])).join(','))].join('\r\n')); });
+app.get('/api/export/deals.csv',auth,requirePermission('deal','export'),(req,res) => { const rows=db.prepare(`${dealSelect(req)} WHERE d.deleted_at IS NULL AND (?=0 OR d.owner_id=?) ORDER BY d.id`).all(ownDeals(req)?1:0,req.user.id); const fields=['id','name','stage_name','loss_reason','amount','company_name','contact_name','owner_name','source','tags','description']; res.type('text/csv; charset=utf-8').set('Content-Disposition','attachment; filename="deals.csv"').send('\uFEFF'+[fields.join(','),...rows.map(r=>fields.map(f=>quoteCsvCell(r[f])).join(','))].join('\r\n')); });
 app.post('/api/import/deals.csv',auth,requirePermission('deal','create'),(req,res) => {
   const pid=int(req.body.pipeline_id);
   if(!idExists('pipelines',pid)||typeof req.body.csv!=='string'||req.body.csv.length>900000)return fail(res,400,'Неверный CSV или воронка');
@@ -712,8 +732,7 @@ app.get('/api/export/:kind.csv',auth,(req,res)=>{
   const config=entityCsv[req.params.kind];if(!config)return fail(res,404,'Неизвестный список');
   if(!allowed(req,config.table==='contacts'?'contact':'company','export'))return fail(res,403,'Нет прав на это действие');
   const rows=req.params.kind==='contacts'?db.prepare(`SELECT c.*,co.name company_name,u.name owner_name FROM contacts c LEFT JOIN companies co ON co.id=c.company_id AND co.deleted_at IS NULL AND (${ownCompanies(req)?1:0}=0 OR co.owner_id=${req.user.id}) LEFT JOIN users u ON u.id=c.owner_id WHERE c.deleted_at IS NULL AND (?=0 OR c.owner_id=?) ORDER BY c.id`).all(ownContacts(req)?1:0,req.user.id):db.prepare('SELECT co.*,u.name owner_name FROM companies co LEFT JOIN users u ON u.id=co.owner_id WHERE co.deleted_at IS NULL AND (?=0 OR co.owner_id=?) ORDER BY co.id').all(ownCompanies(req)?1:0,req.user.id);
-  const quote=item=>`"${String(item??'').replaceAll('"','""')}"`;
-  res.type('text/csv; charset=utf-8').set('Content-Disposition',`attachment; filename="${req.params.kind}.csv"`).send('\uFEFF'+[config.fields.join(','),...rows.map(row=>config.fields.map(field=>quote(row[field])).join(','))].join('\r\n'));
+  res.type('text/csv; charset=utf-8').set('Content-Disposition',`attachment; filename="${req.params.kind}.csv"`).send('\uFEFF'+[config.fields.join(','),...rows.map(row=>config.fields.map(field=>quoteCsvCell(row[field])).join(','))].join('\r\n'));
 });
 app.post('/api/import/:kind.csv',auth,(req,res)=>{
   const config=entityCsv[req.params.kind];if(!config)return fail(res,404,'Неизвестный список');
