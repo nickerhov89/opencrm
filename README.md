@@ -41,6 +41,8 @@ You can also use Docker Compose:
 docker compose up --build -d
 ```
 
+If Compose is installed as a standalone command, use `docker-compose up --build -d` instead.
+
 Compose binds to `127.0.0.1:3001` by default and keeps data and backups in separate volumes. To serve other users, put the app behind an HTTPS reverse proxy and set `COOKIE_SECURE=1`. Do not expose the SQLite file or app port directly to the internet.
 
 ## Quality and data safety
