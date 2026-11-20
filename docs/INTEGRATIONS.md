@@ -53,7 +53,7 @@ The new stage must belong to the deal's current pipeline. Moving to a lost stage
 
 ## Outgoing webhooks
 
-Create an endpoint in Settings → Интеграции with an HTTPS URL and select events. OpenCRM shows a random signing secret **once**. Rotate it from the same screen when needed. The secret is stored in the local SQLite database to sign future messages, so protect database backups as you protect CRM data.
+Create an endpoint in Settings → Интеграции with an HTTPS URL and select events. OpenCRM shows a random signing secret **once**. Rotate it from the same screen when needed. The secret is stored in the CRM database to sign future messages, so protect database backups as you protect CRM data.
 
 | Event | When it fires |
 |---|---|

@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {existsSync,mkdtempSync,readdirSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import Database from 'better-sqlite3';
 import {createLoginLimiter,totpCode,verifyTotp,base32Decode,base32Encode,normalizePermissions,fullPermissions} from '../server/security.js';
 
 test('TOTP matches RFC 6238 vectors and rejects replays',()=>{
@@ -38,27 +37,9 @@ test('permission normalization fills gaps from the given base',()=>{
   assert.equal(normalizePermissions({},fullPermissions()).contact.delete,true);
 });
 
-test('existing members keep their effective rights after the permission migration',async()=>{
-  const folder=mkdtempSync(join(tmpdir(),'opencrm-perm-'));
-  try{
-    const file=join(folder,'old.db');
-    const old=new Database(file);
-    old.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, permissions_json TEXT NOT NULL DEFAULT '{}')");
-    old.prepare('INSERT INTO users (name,email,password_hash,permissions_json) VALUES (?,?,?,?)').run('Old','old@example.test','x:y',JSON.stringify({deal:{delete:false}}));
-    old.close();
-    const {createDb}=await import('../server/db.js');
-    const db=createDb(file);
-    const saved=JSON.parse(db.prepare('SELECT permissions_json FROM users').get().permissions_json);
-    assert.equal(saved.deal.delete,false);
-    assert.equal(saved.deal.export,true);
-    assert.equal(saved.contact.export,true);
-    db.close();
-  }finally{rmSync(folder,{recursive:true,force:true})}
-});
-
 test('account lifecycle, 2FA, default rights, audit log, quotas and purge',async()=>{
   const folder=mkdtempSync(join(tmpdir(),'opencrm-hardening-'));
-  process.env.DATABASE_PATH=join(folder,'crm.db');
+  process.env.PGLITE_DIR=join(folder,'pg');
   process.env.UPLOAD_DIR=join(folder,'uploads');
   process.env.NODE_ENV='test';
   process.env.ATTACHMENT_USER_QUOTA_MB='0.001';
@@ -158,16 +139,16 @@ test('account lifecycle, 2FA, default rights, audit log, quotas and purge',async
     assert.equal((await call('/contacts/'+contact.data.id,{method:'DELETE',cookie:admin})).status,200);
     assert.equal((await call('/trash/contacts/'+contact.data.id,{method:'DELETE',cookie:manager})).status,403);
     assert.equal((await call('/trash/contacts/'+contact.data.id,{method:'DELETE',cookie:admin})).status,200);
-    assert.equal(db.prepare('SELECT COUNT(*) n FROM contacts WHERE id=?').get(contact.data.id).n,0);
-    assert.equal(db.prepare("SELECT COUNT(*) n FROM entity_activity WHERE entity_type='contact' AND entity_id=?").get(contact.data.id).n,0);
-    assert.equal(db.prepare('SELECT COUNT(*) n FROM attachments').get().n,0);
+    assert.equal((await db.prepare('SELECT COUNT(*) n FROM contacts WHERE id=?').get(contact.data.id)).n,0);
+    assert.equal((await db.prepare("SELECT COUNT(*) n FROM entity_activity WHERE entity_type='contact' AND entity_id=?").get(contact.data.id)).n,0);
+    assert.equal((await db.prepare('SELECT COUNT(*) n FROM attachments').get()).n,0);
     assert.ok(!existsSync(join(process.env.UPLOAD_DIR,files[0])));
 
     // Cross-site writes are rejected whatever the case of the path ('/API/...' used to slip through).
     const root=base.slice(0,-4);
     const upper=await fetch(`${root}/API/users/${created.data.id}/disable`,{method:'POST',headers:{Cookie:admin,Origin:'https://evil.example','Content-Type':'application/x-www-form-urlencoded'},body:'x=1'});
     assert.equal(upper.status,403);
-    assert.equal(db.prepare('SELECT disabled_at FROM users WHERE id=?').get(created.data.id).disabled_at,null);
+    assert.equal((await db.prepare('SELECT disabled_at FROM users WHERE id=?').get(created.data.id)).disabled_at,null);
     assert.equal((await fetch(`${root}/API/me`,{headers:{Cookie:admin}})).status,404,'API routes are case-sensitive');
 
     // Accepting a lead never links (or reveals) contacts and companies the employee cannot see.
@@ -179,7 +160,7 @@ test('account lifecycle, 2FA, default rights, audit log, quotas and purge',async
     const probeLead=(await call('/inbox',{method:'POST',cookie:scoped,body:{pipeline_id:pipeline.id,title:'Probe',email:'HIDDEN@corp.test',company_name:'hidden corp'}})).data.id;
     const accepted=await call(`/inbox/${probeLead}/accept`,{method:'POST',cookie:scoped,body:{stage_id:(await call('/stages?pipeline_id='+pipeline.id,{cookie:admin})).data[0].id}});
     assert.equal(accepted.status,200);
-    const acceptedDeal=db.prepare('SELECT contact_id,company_id FROM deals WHERE id=?').get(accepted.data.deal_id);
+    const acceptedDeal=await db.prepare('SELECT contact_id,company_id FROM deals WHERE id=?').get(accepted.data.deal_id);
     assert.notEqual(acceptedDeal.contact_id,hiddenContact);
     assert.notEqual(acceptedDeal.company_id,hiddenCompany);
     assert.ok(!JSON.stringify((await call('/deals/'+accepted.data.deal_id,{cookie:scoped})).data).includes('Hidden'));
@@ -202,7 +183,7 @@ test('account lifecycle, 2FA, default rights, audit log, quotas and purge',async
     assert.equal((await loginFrom('198.51.100.9','victim-password',{Cookie:device})).status,200,'the owner signs in from their known browser');
 
     // Contact list presets stay fast on large data (they used to be quadratic and block the server).
-    db.transaction(()=>{const contactRow=db.prepare('INSERT INTO contacts (name,owner_id) VALUES (?,1)'),companyRow=db.prepare('INSERT INTO companies (name,owner_id) VALUES (?,1)'),dealRow=db.prepare('INSERT INTO deals (name,stage_id,contact_id,company_id,owner_id) VALUES (?,1,?,?,1)'),taskRow=db.prepare('INSERT INTO tasks (title,deal_id,owner_id) VALUES (?,?,1)');for(let i=0;i<5000;i++){const c=contactRow.run('Bulk contact '+i).lastInsertRowid,co=companyRow.run('Bulk company '+i).lastInsertRowid,d=dealRow.run('Bulk deal '+i,c,co).lastInsertRowid;if(i%2)taskRow.run('Bulk task '+i,d)}})();
+    await db.exec("INSERT INTO contacts (id,name,owner_id) OVERRIDING SYSTEM VALUE SELECT 100000+i,'Bulk contact '||i,1 FROM generate_series(0,4999) i; INSERT INTO companies (id,name,owner_id) OVERRIDING SYSTEM VALUE SELECT 100000+i,'Bulk company '||i,1 FROM generate_series(0,4999) i; INSERT INTO deals (id,name,stage_id,contact_id,company_id,owner_id) OVERRIDING SYSTEM VALUE SELECT 100000+i,'Bulk deal '||i,1,100000+i,100000+i,1 FROM generate_series(0,4999) i; INSERT INTO tasks (title,deal_id,owner_id) SELECT 'Bulk task '||i,100000+i,1 FROM generate_series(1,4999,2) i; ANALYZE");
     for(const preset of ['no_tasks','overdue','no_deals']){
       const started=Date.now(),list=await call(`/entity-list?kind=all&page_size=25&preset=${preset}`,{cookie:admin});
       assert.equal(list.status,200);
@@ -221,7 +202,7 @@ test('account lifecycle, 2FA, default rights, audit log, quotas and purge',async
   }finally{
     server.closeAllConnections();
     await new Promise(resolve=>server.close(resolve));
-    db.close();
+    await db.close();
     rmSync(folder,{recursive:true,force:true});
   }
 });

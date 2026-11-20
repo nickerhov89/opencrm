@@ -1,13 +1,36 @@
-import Database from 'better-sqlite3';
+// Backups of the PostgreSQL database (pg_dump, custom format) together with uploaded files.
+//   node scripts/backup.mjs create [folder]     one backup into folder (default ./backups)
+//   node scripts/backup.mjs verify <backup>     checksums + pg_restore --list
+//   node scripts/backup.mjs restore <backup>    into an EMPTY database at DATABASE_URL and an absent UPLOAD_DIR
+//   node scripts/backup.mjs schedule [folder]   keeps running: a backup every BACKUP_INTERVAL_HOURS (24),
+//                                               the newest BACKUP_KEEP (14) are kept
+// pg_dump and pg_restore must be installed (the Docker image has them); PG_BIN may point at their folder.
+import {spawn} from 'node:child_process';
 import {createHash,randomBytes} from 'node:crypto';
-import {constants,createReadStream,existsSync} from 'node:fs';
+import {createReadStream,existsSync} from 'node:fs';
 import {chmod,copyFile,lstat,mkdir,readFile,readdir,rm,stat,writeFile} from 'node:fs/promises';
 import {dirname,join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const root=resolve(fileURLToPath(new URL('..',import.meta.url)));
-const defaultPaths=()=>({database:resolve(process.env.DATABASE_PATH||join(root,'data/opencrm.db')),uploads:resolve(process.env.UPLOAD_DIR||join(root,'data/uploads'))});
+const DUMP='database.dump';
+const defaults=()=>({databaseUrl:process.env.DATABASE_URL,uploads:resolve(process.env.UPLOAD_DIR||join(root,'data/uploads'))});
 const pathExists=async path=>{try{await lstat(path);return true}catch(error){if(error.code==='ENOENT')return false;throw error}};
+const tool=name=>process.env.PG_BIN?join(process.env.PG_BIN,name):name;
+
+function run(name,args,{databaseUrl}={}){
+  return new Promise((resolvePromise,reject)=>{
+    // The connection string goes through the environment so the password never shows up in `ps`.
+    const env={...process.env};
+    if(databaseUrl){const url=new URL(databaseUrl);env.PGHOST=url.hostname;env.PGPORT=url.port||'5432';env.PGUSER=decodeURIComponent(url.username);env.PGPASSWORD=decodeURIComponent(url.password);env.PGDATABASE=decodeURIComponent(url.pathname.slice(1));}
+    const child=spawn(tool(name),args,{env,stdio:['ignore','pipe','pipe']});
+    let output='',errors='';
+    child.stdout.on('data',chunk=>{output+=chunk});
+    child.stderr.on('data',chunk=>{errors+=chunk});
+    child.on('error',error=>reject(error.code==='ENOENT'?new Error(`Не найден ${name}. Установите клиент PostgreSQL или укажите PG_BIN`):error));
+    child.on('close',code=>code===0?resolvePromise(output):reject(new Error(`${name}: ${errors.trim()||`код ${code}`}`)));
+  });
+}
 
 async function regularFiles(base,prefix=''){
   const result=[];
@@ -39,65 +62,70 @@ async function checksum(path){
 
 export async function verifyBackup(folder){
   const base=resolve(folder),manifest=JSON.parse(await readFile(join(base,'manifest.json'),'utf8'));
-  if(manifest.version!==1||!Array.isArray(manifest.files))throw new Error('Неподдерживаемый формат резервной копии');
+  if(manifest.version!==2||!Array.isArray(manifest.files))throw new Error('Неподдерживаемый формат резервной копии');
   const names=manifest.files.map(item=>item.path);
-  if(!names.includes('opencrm.db')||new Set(names).size!==names.length||names.some(name=>typeof name!=='string'||name!=='opencrm.db'&&(!name.startsWith('uploads/')||name.includes('\\')||name.split('/').some(part=>!part||part==='.'||part==='..'))))throw new Error('Некорректный список файлов резервной копии');
+  if(!names.includes(DUMP)||new Set(names).size!==names.length||names.some(name=>typeof name!=='string'||name!==DUMP&&(!name.startsWith('uploads/')||name.includes('\\')||name.split('/').some(part=>!part||part==='.'||part==='..'))))throw new Error('Некорректный список файлов резервной копии');
   const found=(await regularFiles(base)).filter(name=>name!=='manifest.json');
   if(JSON.stringify(found)!==JSON.stringify([...names].sort()))throw new Error('Состав резервной копии изменён');
   for(const item of manifest.files){
     const file=join(base,item.path),size=(await stat(file)).size;
     if(size!==item.bytes||await checksum(file)!==item.sha256)throw new Error(`Повреждён файл: ${item.path}`);
   }
-  const db=new Database(join(base,'opencrm.db'),{readonly:true,fileMustExist:true});
-  try{if(db.pragma('integrity_check')[0]?.integrity_check!=='ok')throw new Error('SQLite: проверка целостности не пройдена')}
-  finally{db.close()}
+  const contents=await run('pg_restore',['--list',join(base,DUMP)]);
+  if(!/TABLE DATA public users/.test(contents))throw new Error('В дампе нет данных CRM');
   return {createdAt:manifest.createdAt,files:manifest.files.length};
 }
 
-export async function createBackup({database,uploads,destination=join(root,'backups')}={}){
-  database=resolve(database||defaultPaths().database);
-  uploads=resolve(uploads||defaultPaths().uploads);
-  if(!existsSync(database))throw new Error(`База не найдена: ${database}`);
+export async function createBackup({databaseUrl,uploads,destination=join(root,'backups')}={}){
+  databaseUrl=databaseUrl||defaults().databaseUrl;
+  uploads=resolve(uploads||defaults().uploads);
+  if(!databaseUrl)throw new Error('Не задан DATABASE_URL');
   const parent=resolve(destination);
   await mkdir(parent,{recursive:true,mode:0o700});
   const folder=join(parent,`opencrm-${new Date().toISOString().replace(/[:.]/g,'-')}-${randomBytes(3).toString('hex')}`);
   await mkdir(folder,{mode:0o700});
   try{
-    const source=new Database(database,{readonly:true,fileMustExist:true});
-    try{await source.backup(join(folder,'opencrm.db'))}finally{source.close()}
-    const snapshot=new Database(join(folder,'opencrm.db'));
-    try{snapshot.pragma('journal_mode = DELETE')}finally{snapshot.close()}
+    await run('pg_dump',['--format=custom','--no-owner','--no-privileges','--file',join(folder,DUMP)],{databaseUrl});
+    await chmod(join(folder,DUMP),0o600);
     await copyDirectory(uploads,join(folder,'uploads'));
-    const files=(await regularFiles(folder)).map(path=>path);
-    const manifest={version:1,createdAt:new Date().toISOString(),files:[]};
-    for(const path of files)manifest.files.push({path,bytes:(await stat(join(folder,path))).size,sha256:await checksum(join(folder,path))});
+    const manifest={version:2,createdAt:new Date().toISOString(),files:[]};
+    for(const path of await regularFiles(folder))manifest.files.push({path,bytes:(await stat(join(folder,path))).size,sha256:await checksum(join(folder,path))});
     await writeFile(join(folder,'manifest.json'),JSON.stringify(manifest,null,2)+'\n',{mode:0o600});
     await verifyBackup(folder);
     return folder;
   }catch(error){await rm(folder,{recursive:true,force:true});throw error}
 }
 
-export async function restoreBackup(folder,{database,uploads}={}){
+export async function restoreBackup(folder,{databaseUrl,uploads}={}){
   const base=resolve(folder);
   await verifyBackup(base);
-  database=resolve(database||defaultPaths().database);
-  uploads=resolve(uploads||defaultPaths().uploads);
-  if(await pathExists(database)||await pathExists(uploads))throw new Error('Путь восстановления уже существует. Остановите CRM и сначала переместите текущие данные в безопасное место.');
-  await mkdir(dirname(database),{recursive:true,mode:0o700});
-  await mkdir(dirname(uploads),{recursive:true,mode:0o700});
-  let createdUploads=false,createdDatabase=false;
-  try{
-    await mkdir(uploads,{mode:0o700});
-    createdUploads=true;
-    await copyDirectory(join(base,'uploads'),uploads);
-    await copyFile(join(base,'opencrm.db'),database,constants.COPYFILE_EXCL);
-    createdDatabase=true;
-    await chmod(database,0o600);
-    const db=new Database(database,{readonly:true,fileMustExist:true});
-    try{if(db.pragma('integrity_check')[0]?.integrity_check!=='ok')throw new Error('Восстановленная база повреждена')}
-    finally{db.close()}
-  }catch(error){if(createdDatabase)await rm(database,{force:true});if(createdUploads)await rm(uploads,{recursive:true,force:true});throw error}
-  return {database,uploads};
+  databaseUrl=databaseUrl||defaults().databaseUrl;
+  uploads=resolve(uploads||defaults().uploads);
+  if(!databaseUrl)throw new Error('Не задан DATABASE_URL');
+  const tables=await run('psql',['--no-psqlrc','--tuples-only','--command',"SELECT count(*) FROM information_schema.tables WHERE table_schema='public'"],{databaseUrl});
+  if(Number(tables.trim())>0)throw new Error('База для восстановления не пустая. Остановите CRM и восстановите копию в новую пустую базу.');
+  if(await pathExists(uploads)&&(await readdir(uploads)).length)throw new Error('Каталог вложений не пустой. Сначала переместите текущие файлы в безопасное место.');
+  await run('pg_restore',['--no-owner','--no-privileges','--exit-on-error','--single-transaction','--dbname',decodeURIComponent(new URL(databaseUrl).pathname.slice(1)),join(base,DUMP)],{databaseUrl});
+  await copyDirectory(join(base,'uploads'),uploads);
+  return {uploads};
+}
+
+async function prune(destination,keep){
+  const parent=resolve(destination);
+  const backups=(await readdir(parent,{withFileTypes:true})).filter(entry=>entry.isDirectory()&&entry.name.startsWith('opencrm-')).map(entry=>entry.name).sort();
+  for(const name of backups.slice(0,Math.max(0,backups.length-keep)))await rm(join(parent,name),{recursive:true,force:true});
+}
+
+async function schedule(destination=join(root,'backups')){
+  const hours=Math.max(1,Number(process.env.BACKUP_INTERVAL_HOURS)||24),keep=Math.max(1,Number(process.env.BACKUP_KEEP)||14);
+  console.log(`Резервные копии каждые ${hours} ч в ${resolve(destination)}, храним ${keep}`);
+  // The app creates the schema on its first start; give it time before the first copy.
+  await new Promise(done=>setTimeout(done,5*60*1000));
+  for(;;){
+    try{console.log(new Date().toISOString(),'Копия создана:',await createBackup({destination}));await prune(destination,keep)}
+    catch(error){console.error(new Date().toISOString(),'Резервная копия не создана:',error.message)}
+    await new Promise(done=>setTimeout(done,hours*3600*1000));
+  }
 }
 
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
@@ -106,6 +134,7 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
     if(action==='create')console.log(await createBackup({destination:path}));
     else if(action==='verify'){if(!path)throw new Error('Укажите каталог копии');console.log(await verifyBackup(path))}
     else if(action==='restore'){if(!path)throw new Error('Укажите каталог копии');console.log(await restoreBackup(path))}
-    else throw new Error('Использование: backup.mjs create [каталог] | verify <копия> | restore <копия>');
+    else if(action==='schedule')await schedule(path);
+    else throw new Error('Использование: backup.mjs create [каталог] | verify <копия> | restore <копия> | schedule [каталог]');
   }catch(error){console.error(error.message);process.exitCode=1}
 }

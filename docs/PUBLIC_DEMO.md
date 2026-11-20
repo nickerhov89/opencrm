@@ -1,6 +1,6 @@
 # Public read-only demo
 
-The public demo uses the regular `scripts/demo.mjs` seed: all people, companies, messages and amounts are fictional. It starts a private OpenCRM server against a temporary SQLite database, then serves the built UI through a proxy that supplies a demo session. This mode must never point at a real CRM database.
+The public demo uses the regular `scripts/demo.mjs` seed: all people, companies, messages and amounts are fictional. It starts a private OpenCRM server against a temporary in-memory database (embedded PGlite), then serves the built UI through a proxy that supplies a demo session. This mode must never point at a real CRM database.
 
 Build the image for a path-prefixed deployment:
 

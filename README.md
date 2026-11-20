@@ -17,7 +17,7 @@ OpenCRM is an independent project. It is not affiliated with amoCRM and does not
 - Assign tasks, see upcoming and overdue work in list, board, or calendar views, and record completion results.
 - Accept leads through a built-in public form, search across records, import/export CSV, and view basic sales reports.
 - Create users with roles and ownership-based visibility; restore deleted records from the trash.
-- Back up the SQLite database and attachments, verify checksums, and restore into a separate directory.
+- Store data in PostgreSQL; back up the database (pg_dump) and attachments on a schedule, verify checksums, and restore into an empty database.
 - Connect external systems with scoped API keys and signed, retried webhooks for leads and deals.
 
 The application is designed for a team running its own instance. The [generic API and webhooks](docs/INTEGRATIONS.md) can connect it to other services. Built-in email, messaging, telephony, and amoCRM synchronization are **not** included; communication records are entered manually and do not send messages.
@@ -38,7 +38,7 @@ Open [http://127.0.0.1:3002](http://127.0.0.1:3002). The demo uses fictional dat
 
 For a public, read-only demo under an existing website path, see [the public demo guide](docs/PUBLIC_DEMO.md).
 
-For a persistent installation, run `npm start` after building and open [http://127.0.0.1:3001](http://127.0.0.1:3001). The first visit asks you to create an administrator. SQLite data and uploads live under `data/` by default. Use `.env.example` to configure paths, host, or port. For development, run `npm run dev` and open [http://127.0.0.1:5173](http://127.0.0.1:5173).
+For a persistent installation, run `npm start` after building and open [http://127.0.0.1:3001](http://127.0.0.1:3001). The first visit asks you to create an administrator. Set `DATABASE_URL` to a PostgreSQL database; without it the app runs on embedded PGlite in memory, which is meant for tests and the demo only. Uploads live under `data/uploads` by default. Use `.env.example` to configure the database, host, or port. For development, run `npm run dev` and open [http://127.0.0.1:5173](http://127.0.0.1:5173).
 
 You can also use Docker Compose:
 
@@ -46,9 +46,9 @@ You can also use Docker Compose:
 docker compose up --build -d
 ```
 
-If Compose is installed as a standalone command, use `docker-compose up --build -d` instead.
+Set `POSTGRES_PASSWORD` in `.env` first (letters and digits, for example `openssl rand -hex 24`). If Compose is installed as a standalone command, use `docker-compose up --build -d` instead.
 
-Compose binds to `127.0.0.1:3001` by default and keeps data and backups in separate volumes. Complete the first administrator setup while the app is private. To serve other users, put the app behind an HTTPS reverse proxy and set `COOKIE_SECURE=1`. Do not expose the SQLite file or app port directly to the internet. The built-in login throttle is per process; add rate limiting at the reverse proxy if you run multiple replicas. Client addresses are taken from `X-Forwarded-For` only when the request comes from a local or private-network proxy, so nginx on the same host or in Docker works without extra settings.
+Compose starts the app, PostgreSQL 17 and a backup service that dumps the database and copies attachments once a day (14 copies kept). The app binds to `127.0.0.1:3001` by default; the database is not published on the host. Complete the first administrator setup while the app is private. To serve other users, put the app behind an HTTPS reverse proxy and set `COOKIE_SECURE=1`. Do not expose the database or app port directly to the internet. The built-in login throttle is per process; add rate limiting at the reverse proxy if you run multiple replicas. Client addresses are taken from `X-Forwarded-For` only when the request comes from a local or private-network proxy, so nginx on the same host or in Docker works without extra settings.
 
 Admins can reset an employee's password, end their sessions, reset two-factor sign-in, or disable access in **Settings → Users**; everyone can change their password and enable authenticator-app codes in **Settings → Security**. New members cannot delete or export until an admin allows it. A security log records sign-ins, permission changes, exports, file downloads, and permanent deletions. If the only admin is locked out, run `npm run admin -- reset-password <email>` or `npm run admin -- reset-2fa <email>` on the server. See [the security section](README.ru.md#безопасность) for details.
 

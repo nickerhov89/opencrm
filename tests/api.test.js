@@ -3,11 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import Database from 'better-sqlite3';
 
 test('первый вход, роли, сделка, задача и журнал сохраняются', async () => {
   const dir=mkdtempSync(join(tmpdir(),'opencrm-test-'));
-  process.env.DATABASE_PATH=join(dir,'crm.db');
+  process.env.PGLITE_DIR=join(dir,'pg');
   process.env.UPLOAD_DIR=join(dir,'uploads');
   process.env.NODE_ENV='test';
   const {app,db}=await import('../server/index.js');
@@ -98,7 +97,7 @@ test('первый вход, роли, сделка, задача и журна�
     assert.equal(duplicatedMask.contact_id,null);
     assert.equal(duplicatedMask.company_id,null);
     assert.deepEqual(duplicatedMask.contacts,[]);
-    db.prepare('DELETE FROM deals WHERE id=?').run(maskedCopy.id);
+    await db.prepare('DELETE FROM deals WHERE id=?').run(maskedCopy.id);
     assert.equal((await request('/search?q=Example')).deals.some(item=>item.id===restrictedDeal.id),false);
     assert.equal((await request('/tasks?state=all')).some(item=>item.id===restrictedTask.id),false);
     await request('/tasks','POST',{title:'Hidden client',contact_id:contact.id},403);
@@ -107,9 +106,9 @@ test('первый вход, роли, сделка, задача и журна�
     await request('/deals/'+restrictedDeal.id,'PATCH',{contact_id:null,company_id:null});
     await request('/deals/'+restrictedDeal.id,'PATCH',{contact_id:contact.id},403);
     await request('/deals/'+restrictedDeal.id+'/contacts','POST',{contact_id:contact.id},400);
-    const contactCount=db.prepare('SELECT COUNT(*) count FROM contacts').get().count;
+    const contactCount=(await db.prepare('SELECT COUNT(*) count FROM contacts').get()).count;
     await request('/deals/'+restrictedDeal.id+'/contacts/new','POST',{name:'   '},400);
-    assert.equal(db.prepare('SELECT COUNT(*) count FROM contacts').get().count,contactCount);
+    assert.equal((await db.prepare('SELECT COUNT(*) count FROM contacts').get()).count,contactCount);
     const dealContact=await request('/deals/'+restrictedDeal.id+'/contacts/new','POST',{name:'Created from deal',phone:'+7 999 111-22-33',email:'deal-contact@example.test',position:'Buyer'},201);
     const createdContact=await request('/contacts/'+dealContact.id);
     assert.equal(createdContact.owner_id,member.id);
@@ -134,11 +133,11 @@ test('первый вход, роли, сделка, задача и журна�
     assert.notEqual(scopedImportedContact.company_id,company.id);
     assert.equal((await request('/companies/'+scopedImportedContact.company_id)).owner_id,member.id);
     await request('/login','POST',{email:'admin@example.test',password:'passphrase-for-tests'});
-    db.prepare('DELETE FROM tasks WHERE id=?').run(restrictedTask.id);
-    db.prepare('DELETE FROM deals WHERE id=?').run(restrictedDeal.id);
-    db.prepare('DELETE FROM contacts WHERE id=?').run(dealContact.id);
-    db.prepare('DELETE FROM contacts WHERE id=?').run(scopedImportedContact.id);
-    db.prepare('DELETE FROM companies WHERE id=?').run(scopedImportedContact.company_id);
+    await db.prepare('DELETE FROM tasks WHERE id=?').run(restrictedTask.id);
+    await db.prepare('DELETE FROM deals WHERE id=?').run(restrictedDeal.id);
+    await db.prepare('DELETE FROM contacts WHERE id=?').run(dealContact.id);
+    await db.prepare('DELETE FROM contacts WHERE id=?').run(scopedImportedContact.id);
+    await db.prepare('DELETE FROM companies WHERE id=?').run(scopedImportedContact.company_id);
     await request('/companies/'+company.id,'PATCH',{owner_id:member.id});
     await request('/contacts/'+contact.id,'PATCH',{owner_id:member.id});
     await request('/login','POST',{email:'member@example.test',password:'member-password'});
@@ -170,7 +169,7 @@ test('первый вход, роли, сделка, задача и журна�
     assert.ok((await request('/entity-tags?kind=all')).some(item=>item.tag==='Партнёр'&&item.count===1));
     await request('/entity-list?kind=all&owner_id=bad','GET',null,400);
     const insertPageCompany=db.prepare('INSERT INTO companies (name) VALUES (?)');
-    for(let index=0;index<30;index++)insertPageCompany.run(`Test Company ${String(index).padStart(2,'0')}`);
+    for(let index=0;index<30;index++)await insertPageCompany.run(`Test Company ${String(index).padStart(2,'0')}`);
     const companyPageOne=await request('/entity-list?kind=company&page=1&page_size=25');
     const companyPageTwo=await request('/entity-list?kind=company&page=2&page_size=25');
     assert.equal(companyPageOne.total,31);
@@ -358,8 +357,8 @@ test('первый вход, роли, сделка, задача и журна�
     assert.deepEqual(duplicated.notes,[]);
     assert.deepEqual(duplicated.communications,[]);
     assert.deepEqual(duplicated.attachments,[]);
-    db.prepare("DELETE FROM custom_field_values WHERE entity_id=? AND field_id IN (SELECT id FROM custom_fields WHERE entity_type='deal')").run(copy.id);
-    db.prepare('DELETE FROM deals WHERE id=?').run(copy.id);
+    await db.prepare("DELETE FROM custom_field_values WHERE entity_id=? AND field_id IN (SELECT id FROM custom_fields WHERE entity_type='deal')").run(copy.id);
+    await db.prepare('DELETE FROM deals WHERE id=?').run(copy.id);
     const task=await request('/tasks','POST',{title:'Call client',task_type:'Встреча',deal_id:deal.id,owner_id:user.id},201);
     await request('/tasks/'+task.id,'PATCH',{completed:true},400);
     await request('/tasks/'+task.id,'PATCH',{completed:true,result:'Созвонились и согласовали следующий шаг'});
@@ -420,13 +419,13 @@ test('первый вход, роли, сделка, задача и журна�
     const csvContactA=await request('/contacts','POST',{name:'Shared Name',company_id:csvCompanyA.id},201);
     const csvContactB=await request('/contacts','POST',{name:'Shared Name',company_id:csvCompanyB.id},201);
     assert.equal((await request('/import/deals.csv','POST',{pipeline_id:pipeline.id,csv:'name,company_name,contact_name\nMatched B,CSV Beta,Shared Name'})).imported,1);
-    const matchedB=db.prepare('SELECT id,company_id,contact_id FROM deals WHERE name=?').get('Matched B');
+    const matchedB=await db.prepare('SELECT id,company_id,contact_id FROM deals WHERE name=?').get('Matched B');
     assert.equal(matchedB.company_id,csvCompanyB.id);
     assert.equal(matchedB.contact_id,csvContactB.id);
     assert.notEqual(matchedB.contact_id,csvContactA.id);
-    db.prepare('DELETE FROM deals WHERE id=?').run(matchedB.id);
-    for(const id of [csvContactA.id,csvContactB.id])db.prepare('DELETE FROM contacts WHERE id=?').run(id);
-    for(const id of [csvCompanyA.id,csvCompanyB.id])db.prepare('DELETE FROM companies WHERE id=?').run(id);
+    await db.prepare('DELETE FROM deals WHERE id=?').run(matchedB.id);
+    for(const id of [csvContactA.id,csvContactB.id])await db.prepare('DELETE FROM contacts WHERE id=?').run(id);
+    for(const id of [csvCompanyA.id,csvCompanyB.id])await db.prepare('DELETE FROM companies WHERE id=?').run(id);
     const addedStage=await request('/stages','POST',{pipeline_id:pipeline.id,name:'Переговоры',color:'#abc123'},201);
     const ordered=await request('/stages?pipeline_id='+pipeline.id);
     assert.equal(ordered.at(-3).id,addedStage.id);
@@ -568,7 +567,7 @@ test('первый вход, роли, сделка, задача и журна�
     await request('/import/companies.csv','POST',{csv:'name,website,email\n"North, Inc",https://north.example,north@example.test\n,https://empty.example,\n'},200);
     assert.ok((await request('/export/companies.csv')).includes('"North, Inc"'));
     await request('/import/contacts.csv','POST',{csv:'Имя;Компания;Телефон;Должность\n"Анна; Мария";"North, Inc";+7 999 000 00 00;Директор'},200);
-    const importedContact=db.prepare('SELECT c.*,co.name company_name FROM contacts c LEFT JOIN companies co ON co.id=c.company_id WHERE c.name=?').get('Анна; Мария');
+    const importedContact=await db.prepare('SELECT c.*,co.name company_name FROM contacts c LEFT JOIN companies co ON co.id=c.company_id WHERE c.name=?').get('Анна; Мария');
     assert.equal(importedContact.company_name,'North, Inc');
     assert.equal(importedContact.position,'Директор');
     assert.ok((await request('/export/contacts.csv')).includes('"Анна; Мария"'));
@@ -593,7 +592,7 @@ test('первый вход, роли, сделка, задача и журна�
     assert.ok(!(await request('/tasks?state=all')).some(task=>task.id===recoverableTask.id));
     await request('/contacts','POST',{name:'Bad link',company_id:999999},400);
     assert.equal((await request('/deals/'+deal.id)).contact_name,null);
-    assert.equal(db.prepare('SELECT contact_id FROM deals WHERE id=?').get(deal.id).contact_id,contact.id);
+    assert.equal((await db.prepare('SELECT contact_id FROM deals WHERE id=?').get(deal.id)).contact_id,contact.id);
     await request('/contacts/'+contact.id+'/restore','POST');
     assert.deepEqual((await request('/contacts/'+contact.id)).activity.slice(0,2).map(item=>item.event),['Запись восстановлена из корзины','Запись перемещена в корзину']);
     assert.equal((await request('/deals/'+deal.id)).contact_name,'Example Person');
@@ -605,7 +604,7 @@ test('первый вход, роли, сделка, задача и журна�
     assert.equal((await fetch(base+'/attachments/'+companyAttachment.id+'/download',{headers:{Cookie:cookie}})).status,404);
     assert.equal((await request('/contacts/'+contact.id)).company_name,null);
     assert.ok(!(await request('/tasks?state=all')).some(task=>task.id===ownCompanyTask.id));
-    assert.equal(db.prepare('SELECT company_id FROM contacts WHERE id=?').get(contact.id).company_id,company.id);
+    assert.equal((await db.prepare('SELECT company_id FROM contacts WHERE id=?').get(contact.id)).company_id,company.id);
     await request('/companies/'+company.id+'/restore','POST');
     assert.equal((await request('/contacts/'+contact.id)).company_name,'Example Ltd');
     assert.ok((await request('/tasks?state=all')).some(task=>task.id===ownCompanyTask.id));
@@ -668,9 +667,9 @@ test('первый вход, роли, сделка, задача и журна�
     assert.ok(dashboardAll.sources.some(item=>item.name==='Партнёр'));
     const dashboardMine=await request(`/dashboard?from=${dashboardFrom}&to=${dashboardTo}&scope=mine`);
     assert.ok(!dashboardMine.recent.some(item=>item.id===dashboardDeal.id));
-    const beforeQuick=db.prepare('SELECT (SELECT COUNT(*) FROM deals)+(SELECT COUNT(*) FROM contacts)+(SELECT COUNT(*) FROM companies) total').get().total;
+    const beforeQuick=(await db.prepare('SELECT (SELECT COUNT(*) FROM deals)+(SELECT COUNT(*) FROM contacts)+(SELECT COUNT(*) FROM companies) total').get()).total;
     await request('/deals/quick','POST',{name:'Bad quick deal',stage_id:stages[0].id,company_address:'No company'},400);
-    assert.equal(db.prepare('SELECT (SELECT COUNT(*) FROM deals)+(SELECT COUNT(*) FROM contacts)+(SELECT COUNT(*) FROM companies) total').get().total,beforeQuick);
+    assert.equal((await db.prepare('SELECT (SELECT COUNT(*) FROM deals)+(SELECT COUNT(*) FROM contacts)+(SELECT COUNT(*) FROM companies) total').get()).total,beforeQuick);
     const quick=await request('/deals/quick','POST',{name:'Quick deal',stage_id:stages[0].id,amount:80000,contact_name:'Quick Contact',contact_phone:'+70000000000',contact_email:'quick@example.test',company_name:'Quick Company',company_address:'Москва, Тестовая 1'},201);
     const quickPage=await request('/deals/'+quick.id);
     assert.equal(quickPage.contact_name,'Quick Contact');
@@ -684,48 +683,21 @@ test('первый вход, роли, сделка, задача и журна�
     assert.equal(linkedPage.owner_id,member.id);
     assert.equal(linkedPage.description,'Создано из полной формы');
     assert.equal(linkedPage.tags,'Пилот');
-    const beforeInvalidLinked=db.prepare('SELECT COUNT(*) total FROM deals').get().total;
+    const beforeInvalidLinked=(await db.prepare('SELECT COUNT(*) total FROM deals').get()).total;
     await request('/deals/quick','POST',{name:'Conflicting contact',stage_id:stages[0].id,contact_id:quickPage.contact_id,contact_name:'Duplicate'},400);
-    assert.equal(db.prepare('SELECT COUNT(*) total FROM deals').get().total,beforeInvalidLinked);
+    assert.equal((await db.prepare('SELECT COUNT(*) total FROM deals').get()).total,beforeInvalidLinked);
     await request('/dashboard?from=bad&to=2026-10-14&scope=all','GET',null,400);
     await request('/logout','POST');
     await request('/deals/'+deal.id,'GET',null,401);
-    db.close();
+    await db.close();
     const {createDb}=await import('../server/db.js');
-    const reopened=createDb(process.env.DATABASE_PATH);
-    assert.equal(reopened.prepare('SELECT name FROM deals WHERE id=?').get(deal.id).name,'Pilot');
-    assert.equal(reopened.prepare('SELECT name FROM user_groups WHERE id=?').get(group.id).name,'Account Executives');
-    assert.equal(JSON.parse(reopened.prepare('SELECT permissions_json FROM users WHERE id=?').get(member.id).permissions_json).deal.delete,false);
-    assert.equal(reopened.prepare('SELECT all_day FROM tasks WHERE id=?').get(scheduled.id).all_day,1);
-    assert.equal(reopened.prepare('SELECT loss_reason FROM deals WHERE id=?').get(sibling.id).loss_reason,'Долго не отвечает');
-    assert.equal(reopened.prepare('SELECT pinned FROM notes WHERE id=?').get(note.id).pinned,1);
-    reopened.close();
-  } finally {server.closeAllConnections();await new Promise(resolve=>server.close(resolve));try{db.close()}catch{}rmSync(dir,{recursive:true,force:true});}
-});
-
-test('существующие контакты и компании получают поле ответственного без потери данных', async () => {
-  const dir=mkdtempSync(join(tmpdir(),'opencrm-migrate-'));
-  const path=join(dir,'legacy.db');
-  try {
-    const legacy=new Database(path);
-    legacy.exec(`
-      CREATE TABLE companies (id INTEGER PRIMARY KEY, name TEXT NOT NULL, website TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, deleted_at TEXT);
-      CREATE TABLE contacts (id INTEGER PRIMARY KEY, name TEXT NOT NULL, company_id INTEGER, phone TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', position TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, deleted_at TEXT);
-      CREATE TABLE deal_card_layouts (pipeline_id INTEGER PRIMARY KEY, fields_json TEXT NOT NULL);
-      CREATE TABLE notes (id INTEGER PRIMARY KEY, deal_id INTEGER NOT NULL, user_id INTEGER, body TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-      INSERT INTO companies (name,tags) VALUES ('Legacy company','Партнёр');
-      INSERT INTO contacts (name,company_id,tags) VALUES ('Legacy person',1,'ЛПР');
-      INSERT INTO deal_card_layouts (pipeline_id,fields_json) VALUES (1,'["client","amount"]');
-    `);
-    legacy.close();
-    const {createDb}=await import('../server/db.js');
-    const migrated=createDb(path);
-    assert.equal(migrated.prepare('SELECT name,tags,owner_id FROM companies WHERE id=1').get().name,'Legacy company');
-    assert.equal(migrated.prepare('SELECT address FROM companies WHERE id=1').get().address,'');
-    assert.equal(migrated.prepare('SELECT name,tags,owner_id FROM contacts WHERE id=1').get().tags,'ЛПР');
-    assert.ok(migrated.prepare('PRAGMA table_info(notes)').all().some(column=>column.name==='pinned'));
-    assert.equal(migrated.prepare('SELECT owner_id FROM contacts WHERE id=1').get().owner_id,null);
-    assert.deepEqual(migrated.prepare('SELECT fields_json,show_avatar FROM deal_card_layouts WHERE pipeline_id=1').get(),{fields_json:'["client","amount"]',show_avatar:1});
-    migrated.close();
-  } finally {rmSync(dir,{recursive:true,force:true})}
+    const reopened=await createDb({dataDir:process.env.PGLITE_DIR});
+    assert.equal((await reopened.prepare('SELECT name FROM deals WHERE id=?').get(deal.id)).name,'Pilot');
+    assert.equal((await reopened.prepare('SELECT name FROM user_groups WHERE id=?').get(group.id)).name,'Account Executives');
+    assert.equal(JSON.parse((await reopened.prepare('SELECT permissions_json FROM users WHERE id=?').get(member.id)).permissions_json).deal.delete,false);
+    assert.equal((await reopened.prepare('SELECT all_day FROM tasks WHERE id=?').get(scheduled.id)).all_day,1);
+    assert.equal((await reopened.prepare('SELECT loss_reason FROM deals WHERE id=?').get(sibling.id)).loss_reason,'Долго не отвечает');
+    assert.equal((await reopened.prepare('SELECT pinned FROM notes WHERE id=?').get(note.id)).pinned,1);
+    await reopened.close();
+  } finally {server.closeAllConnections();await new Promise(resolve=>server.close(resolve));try{await db.close()}catch{}rmSync(dir,{recursive:true,force:true});}
 });
