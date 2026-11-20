@@ -15,7 +15,8 @@
     "backup": "node --env-file-if-exists=.env scripts/backup.mjs create",
     "backup:verify": "node scripts/backup.mjs verify",
     "backup:restore": "node --env-file-if-exists=.env scripts/backup.mjs restore",
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js",
+    "admin": "node --env-file-if-exists=.env scripts/admin.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^12.4.1",

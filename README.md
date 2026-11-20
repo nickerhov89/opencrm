@@ -48,7 +48,9 @@ docker compose up --build -d
 
 If Compose is installed as a standalone command, use `docker-compose up --build -d` instead.
 
-Compose binds to `127.0.0.1:3001` by default and keeps data and backups in separate volumes. Complete the first administrator setup while the app is private. To serve other users, put the app behind an HTTPS reverse proxy and set `COOKIE_SECURE=1`. Do not expose the SQLite file or app port directly to the internet. The built-in login throttle is per process; add rate limiting at the reverse proxy if you run multiple replicas.
+Compose binds to `127.0.0.1:3001` by default and keeps data and backups in separate volumes. Complete the first administrator setup while the app is private. To serve other users, put the app behind an HTTPS reverse proxy and set `COOKIE_SECURE=1`. Do not expose the SQLite file or app port directly to the internet. The built-in login throttle is per process; add rate limiting at the reverse proxy if you run multiple replicas. Client addresses are taken from `X-Forwarded-For` only when the request comes from a local or private-network proxy, so nginx on the same host or in Docker works without extra settings.
+
+Admins can reset an employee's password, end their sessions, reset two-factor sign-in, or disable access in **Settings → Users**; everyone can change their password and enable authenticator-app codes in **Settings → Security**. New members cannot delete or export until an admin allows it. A security log records sign-ins, permission changes, exports, file downloads, and permanent deletions. If the only admin is locked out, run `npm run admin -- reset-password <email>` or `npm run admin -- reset-2fa <email>` on the server. See [the security section](README.ru.md#безопасность) for details.
 
 ## Quality and data safety
 

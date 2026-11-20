@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — security hardening
+
+- Admins can disable employees, set a new password, end all of an employee's sessions and reset their two-factor sign-in; disabling or resetting ends sessions immediately. A server-side `npm run admin` command recovers a locked-out administrator.
+- Everyone can change their password, end sessions on other devices, and turn on TOTP two-factor sign-in.
+- Permissions are now denied unless granted. New members can create and edit but not delete or export by default; existing members keep their previous effective rights.
+- Security log for sign-ins, failed attempts, user and permission changes, CSV import/export, file downloads, API keys, webhooks and permanent deletions.
+- Login throttling per IP, per IP and account, and per account; constant-time response for unknown emails; malformed cookies no longer cause server errors.
+- Content-Security-Policy, X-Frame-Options and related headers, HSTS with `COOKIE_SECURE=1`, and real client IPs behind a local or private-network reverse proxy without extra configuration.
+- Rejecting or restoring inbox leads requires the right to create deals; admins can delete leads permanently.
+- Attachment storage quotas, and permanent deletion from the trash including history and files.
+- Updated `body-parser` and `qs` to fix known denial-of-service advisories.
+- Second audit fixes: contact-list presets no longer run a quadratic query that could block the server; CSV imports are capped at `IMPORT_MAX_ROWS` (5000) with indexed name lookups; cross-site checks cover every state-changing request and API routes are case-sensitive (`/API/...` bypassed the check); accepting an inbox lead only matches contacts and companies the employee can see; a browser that signed in before is not locked out when someone fails logins for that account from many addresses.
+
 ## 0.2.1 — 2026-10-13
 
 Added a read-only public demo mode with fictional data, a Polza Agency link, and support for hosting the frontend under a path prefix. Local development can proxy API requests to a separately running demo via `OPENCRM_DEV_API_TARGET`.

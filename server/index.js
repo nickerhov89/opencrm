@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { createDb } from './db.js';
 import { parseCsv, quoteCsvCell } from './csv.js';
 import { registerIntegrations } from './integrations.js';
+import { permissionEntities, permissionActions, normalizePermissions, noPermissions, defaultMemberPermissions, securityHeaders, createLoginLimiter, newTotpSecret, verifyTotp, otpauthUrl } from './security.js';
 import {defaultDealCardFields,validDealCardFields} from '../src/deal-card-layout.js';
 
 const app = express();
@@ -16,11 +17,20 @@ const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const uploadDir = resolve(process.env.UPLOAD_DIR || resolve(root,'data/uploads'));
 mkdirSync(uploadDir,{recursive:true});
 app.disable('x-powered-by');
+// X-Forwarded-For is honoured only when the request comes from a local or private-network address
+// (nginx on the same host, Docker bridge, LAN proxy). Clients connecting directly from the internet
+// cannot spoof their IP, and no configuration is needed behind a typical reverse proxy.
+app.set('trust proxy',['loopback','linklocal','uniquelocal']);
+// Routes must match exactly: with case-insensitive routing '/API/...' reached the handlers
+// while the cross-site check below (which looked for '/api/') let it through.
+app.set('case sensitive routing',true);
+const isApiPath=path=>path.toLowerCase().startsWith('/api/');
+const httpsOnly=process.env.NODE_ENV==='production'&&process.env.COOKIE_SECURE==='1';
 app.use((req,res,next)=>{
-  res.set('X-Content-Type-Options','nosniff');
-  res.set('Referrer-Policy','strict-origin-when-cross-origin');
-  if(req.path.startsWith('/api/'))res.set('Cache-Control','no-store');
-  if(!req.path.startsWith('/api/')||['GET','HEAD','OPTIONS'].includes(req.method))return next();
+  securityHeaders(res,{https:httpsOnly});
+  if(isApiPath(req.path))res.set('Cache-Control','no-store');
+  // Every state-changing request is checked, whatever its path.
+  if(['GET','HEAD','OPTIONS'].includes(req.method))return next();
   const origin=req.get('origin'),referer=req.get('referer');
   const source=origin||referer;
   if(source){
@@ -36,21 +46,32 @@ const fail = (res, code, message) => res.status(code).json({ error: message });
 const hashPassword = password => { const salt = randomBytes(16).toString('hex'); return `${salt}:${scryptSync(password,salt,64).toString('hex')}`; };
 const verifyPassword = (password, stored) => { const [salt, hash] = stored.split(':'); if (!salt || !hash) return false; const computed = scryptSync(password,salt,64); const saved = Buffer.from(hash,'hex'); return saved.length === computed.length && timingSafeEqual(saved,computed); };
 const tokenHash = token => createHash('sha256').update(token).digest('hex');
-const loginFailures=new Map();
-const loginWindowMs=15*60*1000;
-const loginLimit=20;
-const loginKey=email=>tokenHash(email);
-const loginState=email=>{const key=loginKey(email),state=loginFailures.get(key);if(state&&state.until>Date.now())return {key,state};loginFailures.delete(key);return {key,state:null}};
-const recordLoginFailure=(key,state)=>{if(loginFailures.size>=10000){for(const [entry,item] of loginFailures)if(item.until<=Date.now())loginFailures.delete(entry);if(loginFailures.size>=10000)loginFailures.delete(loginFailures.keys().next().value)}const next={count:(state?.count||0)+1,until:state?.until||Date.now()+loginWindowMs};loginFailures.set(key,next);return next};
-const cookies = req => Object.fromEntries((req.headers.cookie || '').split(';').map(part => part.trim().split('=').map(decodeURIComponent)).filter(([k,v]) => k && v));
-const setSession = (res, userId) => { const token = randomBytes(32).toString('hex'); db.prepare('INSERT INTO sessions (token_hash,user_id,expires_at) VALUES (?,?,?)').run(tokenHash(token),userId,Date.now()+30*864e5); res.setHeader('Set-Cookie',`opencrm_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000${process.env.NODE_ENV === 'production' && process.env.COOKIE_SECURE === '1' ? '; Secure' : ''}`); };
-const permissionEntities=['deal','contact','company','task'];
-const permissionActions=['create','edit','delete','export'];
+const loginLimiter=createLoginLimiter();
+const dummyPasswordHash=hashPassword(randomBytes(16).toString('hex'));
+const clientIp=req=>String(req.ip||req.socket?.remoteAddress||'').slice(0,64);
+const audit=(req,action,{target='',details='',userId,actor}={})=>{try{db.prepare('INSERT INTO audit_log (user_id,actor,action,target,details,ip) VALUES (?,?,?,?,?,?)').run(userId===undefined?req?.user?.id??null:userId,String(actor??req?.user?.email??'').slice(0,254),action,String(target).slice(0,255),String(details).slice(0,2000),req?clientIp(req):'')}catch(error){console.error('Audit log:',error)}};
+const purgeSecurityData=()=>{db.prepare('DELETE FROM sessions WHERE expires_at<=?').run(Date.now());db.prepare('DELETE FROM trusted_devices WHERE expires_at<=?').run(Date.now());db.prepare("DELETE FROM audit_log WHERE created_at<datetime('now',?)").run(`-${Math.max(30,Number(process.env.AUDIT_LOG_RETENTION_DAYS)||365)} days`)};
+if(process.env.NODE_ENV!=='test'){purgeSecurityData();setInterval(purgeSecurityData,60*60*1000).unref()}
+const safeDecode=value=>{try{return decodeURIComponent(value)}catch{return ''}};
+const cookies = req => Object.fromEntries((req.headers.cookie || '').split(';').map(part => {const index=part.indexOf('=');return index<0?['','']:[part.slice(0,index).trim(),safeDecode(part.slice(index+1).trim())]}).filter(([k,v]) => k && v));
+const setSession = (res, userId) => { const token = randomBytes(32).toString('hex'); db.prepare('INSERT INTO sessions (token_hash,user_id,expires_at,created_at) VALUES (?,?,?,?)').run(tokenHash(token),userId,Date.now()+30*864e5,Date.now()); res.setHeader('Set-Cookie',`opencrm_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000${httpsOnly ? '; Secure' : ''}`); return token; };
+const clearSessionCookie=res=>res.setHeader('Set-Cookie',`opencrm_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${httpsOnly?'; Secure':''}`);
+const revokeSessions=(userId,exceptToken)=>db.prepare('DELETE FROM sessions WHERE user_id=? AND token_hash<>?').run(userId,exceptToken?tokenHash(exceptToken):'').changes;
+const deviceTrusted=(req,userId)=>{const token=cookies(req).opencrm_device;return !!(token&&userId&&db.prepare('SELECT 1 FROM trusted_devices WHERE token_hash=? AND user_id=? AND expires_at>?').get(tokenHash(token),userId,Date.now()))};
+const rememberDevice=(req,res,userId)=>{
+  if(deviceTrusted(req,userId))return;
+  const token=randomBytes(32).toString('hex'),ttl=180*864e5;
+  db.prepare('INSERT INTO trusted_devices (token_hash,user_id,expires_at) VALUES (?,?,?)').run(tokenHash(token),userId,Date.now()+ttl);
+  db.prepare('DELETE FROM trusted_devices WHERE user_id=? AND token_hash NOT IN (SELECT token_hash FROM trusted_devices WHERE user_id=? ORDER BY expires_at DESC LIMIT 20)').run(userId,userId);
+  res.append('Set-Cookie',`opencrm_device=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${ttl/1000}${httpsOnly?'; Secure':''}`);
+};
+const forgetDevices=userId=>db.prepare('DELETE FROM trusted_devices WHERE user_id=?').run(userId);
+const validNewPassword=password=>typeof password==='string'&&password.length>=10&&password.length<=1024;
 const parsePermissions=raw=>{try{return JSON.parse(raw||'{}')}catch{return {}}};
 const validPermissions=permissions=>permissions&&typeof permissions==='object'&&!Array.isArray(permissions)&&Object.keys(permissions).every(entity=>permissionEntities.includes(entity)&&permissions[entity]&&typeof permissions[entity]==='object'&&!Array.isArray(permissions[entity])&&Object.entries(permissions[entity]).every(([action,allowed])=>permissionActions.includes(action)&&typeof allowed==='boolean'));
-const allowed=(req,entity,action)=>req.user.role==='admin'||req.user.permissions?.[entity]?.[action]!==false;
+const allowed=(req,entity,action)=>req.user.role==='admin'||req.user.permissions?.[entity]?.[action]===true;
 const requirePermission=(entity,action)=>(req,res,next)=>allowed(req,entity,action)?next():fail(res,403,'Нет прав на это действие');
-const auth = (req,res,next) => { const token = cookies(req).opencrm_session; const row = token && db.prepare('SELECT u.id,u.name,u.email,u.role,u.deal_access,u.task_access,u.contact_access,u.company_access,u.group_id,u.permissions_json FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?').get(tokenHash(token),Date.now()); if (!row) return fail(res,401,'Нужен вход в систему'); req.user={...row,permissions:parsePermissions(row.permissions_json)};delete req.user.permissions_json;next(); };
+const auth = (req,res,next) => { const token = cookies(req).opencrm_session; const row = token && db.prepare('SELECT u.id,u.name,u.email,u.role,u.deal_access,u.task_access,u.contact_access,u.company_access,u.group_id,u.permissions_json,u.totp_secret FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.disabled_at IS NULL').get(tokenHash(token),Date.now()); if (!row) return fail(res,401,'Нужен вход в систему'); const {permissions_json,totp_secret,...user}=row; req.user={...user,totp_enabled:!!totp_secret,permissions:normalizePermissions(parsePermissions(permissions_json))}; req.sessionToken=token; next(); };
 const admin = (req,res,next) => req.user.role === 'admin' ? next() : fail(res,403,'Нужны права администратора');
 const required = (v,max=255) => typeof v === 'string' && v.trim().length > 0 && v.trim().length <= max;
 const value = (v,max=1000) => typeof v === 'string' ? v.trim().slice(0,max) : '';
@@ -112,10 +133,79 @@ const attachmentsFor=(type,id)=>db.prepare('SELECT a.id,a.filename,a.mime_type,a
 const dealContactsFor=(req,id)=>db.prepare(`SELECT c.id,c.name,c.position,c.phone,c.email,c.company_id,co.name company_name FROM deal_contacts dc JOIN contacts c ON c.id=dc.contact_id AND c.deleted_at IS NULL AND (${ownContacts(req)?1:0}=0 OR c.owner_id=${req.user.id}) LEFT JOIN companies co ON co.id=c.company_id AND co.deleted_at IS NULL AND (${ownCompanies(req)?1:0}=0 OR co.owner_id=${req.user.id}) WHERE dc.deal_id=? ORDER BY (c.id=(SELECT contact_id FROM deals WHERE id=?)) DESC,dc.created_at,c.id`).all(id,id);
 
 app.get('/api/status', (_req,res) => res.json({ setup: db.prepare('SELECT COUNT(*) n FROM users').get().n === 0 }));
-app.post('/api/setup',(req,res) => { if (db.prepare('SELECT COUNT(*) n FROM users').get().n) return fail(res,409,'Аккаунт уже создан'); const {name,email,password}=req.body; if (!required(name,120)||!required(email,254)||!email.includes('@')||typeof password!=='string'||password.length<10) return fail(res,400,'Укажите имя, email и пароль от 10 символов'); const result=db.prepare('INSERT INTO users (name,email,password_hash,role) VALUES (?,?,?,?)').run(name.trim(),email.trim().toLowerCase(),hashPassword(password),'admin'); setSession(res,result.lastInsertRowid); res.json({id:result.lastInsertRowid,name:name.trim(),email:email.trim().toLowerCase(),role:'admin'}); });
-app.post('/api/login',(req,res) => { const email=value(req.body?.email,254).toLowerCase(),{key,state}=loginState(email);if(state?.count>=loginLimit){res.set('Retry-After',String(Math.ceil((state.until-Date.now())/1000)));return fail(res,429,'Слишком много попыток входа. Повторите позже')}const u=db.prepare('SELECT * FROM users WHERE email=?').get(email);if(!u||typeof req.body?.password!=='string'||req.body.password.length>1024||!verifyPassword(req.body.password,u.password_hash)){recordLoginFailure(key,state);return fail(res,401,'Неверный email или пароль')}loginFailures.delete(key);setSession(res,u.id);res.json({id:u.id,name:u.name,email:u.email,role:u.role,deal_access:u.deal_access,task_access:u.task_access,contact_access:u.contact_access,company_access:u.company_access,group_id:u.group_id,permissions:parsePermissions(u.permissions_json)}); });
-app.post('/api/logout',auth,(req,res) => { db.prepare('DELETE FROM sessions WHERE token_hash=?').run(tokenHash(cookies(req).opencrm_session)); res.setHeader('Set-Cookie','opencrm_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'); res.json({ok:true}); });
+const publicUser=u=>({id:u.id,name:u.name,email:u.email,role:u.role,deal_access:u.deal_access,task_access:u.task_access,contact_access:u.contact_access,company_access:u.company_access,group_id:u.group_id,totp_enabled:!!u.totp_secret,permissions:normalizePermissions(parsePermissions(u.permissions_json))});
+const activeAdminCount=()=>db.prepare("SELECT COUNT(*) n FROM users WHERE role='admin' AND disabled_at IS NULL").get().n;
+app.post('/api/setup',(req,res) => { if (db.prepare('SELECT COUNT(*) n FROM users').get().n) return fail(res,409,'Аккаунт уже создан'); const {name,email,password}=req.body; if (!required(name,120)||!required(email,254)||!email.includes('@')||!validNewPassword(password)) return fail(res,400,'Укажите имя, email и пароль от 10 символов'); const result=db.prepare('INSERT INTO users (name,email,password_hash,role,password_changed_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP)').run(name.trim(),email.trim().toLowerCase(),hashPassword(password),'admin'); setSession(res,result.lastInsertRowid); audit(req,'auth.setup',{userId:result.lastInsertRowid,actor:email.trim().toLowerCase(),target:`user:${result.lastInsertRowid}`}); res.json(publicUser(db.prepare('SELECT * FROM users WHERE id=?').get(result.lastInsertRowid))); });
+app.post('/api/login',(req,res) => {
+  const email=value(req.body?.email,254).toLowerCase(),ip=clientIp(req),password=req.body?.password,code=typeof req.body?.code==='string'?req.body.code.replace(/\s+/g,''):'';
+  const u=email?db.prepare('SELECT * FROM users WHERE email=?').get(email):null;
+  const retry=loginLimiter.blocked(ip,email,{trusted:deviceTrusted(req,u?.id)});
+  if(retry){res.set('Retry-After',String(retry));audit(req,'auth.login_blocked',{userId:null,actor:email});return fail(res,429,'Слишком много попыток входа. Повторите позже')}
+  // A dummy hash keeps the response time the same whether or not the email exists.
+  const passwordOk=typeof password==='string'&&password.length<=1024&&verifyPassword(password,u?.password_hash||dummyPasswordHash)&&!!u;
+  if(!passwordOk||u.disabled_at){loginLimiter.fail(ip,email);audit(req,'auth.login_failed',{userId:u?.id??null,actor:email,details:u?.disabled_at&&passwordOk?'Учётная запись отключена':'Неверный пароль'});return fail(res,401,'Неверный email или пароль')}
+  if(u.totp_secret){
+    if(!code)return res.status(401).json({error:'Введите код из приложения-аутентификатора',totp_required:true});
+    const step=verifyTotp(u.totp_secret,code,{lastCounter:u.totp_last_counter});
+    if(step===null){loginLimiter.fail(ip,email);audit(req,'auth.login_failed',{userId:u.id,actor:email,details:'Неверный код 2FA'});return res.status(401).json({error:'Неверный код подтверждения',totp_required:true})}
+    db.prepare('UPDATE users SET totp_last_counter=? WHERE id=?').run(step,u.id);
+  }
+  loginLimiter.success(ip,email);setSession(res,u.id);rememberDevice(req,res,u.id);audit(req,'auth.login',{userId:u.id,actor:u.email});res.json(publicUser(u));
+});
+app.post('/api/logout',auth,(req,res) => { db.prepare('DELETE FROM sessions WHERE token_hash=?').run(tokenHash(req.sessionToken)); audit(req,'auth.logout'); clearSessionCookie(res); res.json({ok:true}); });
 app.get('/api/me',auth,(req,res) => res.json(req.user));
+const currentUserRow=req=>db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
+const confirmIdentity=(req,row,{requireCode=true}={})=>{
+  if(typeof req.body?.current_password!=='string'||req.body.current_password.length>1024||!verifyPassword(req.body.current_password,row.password_hash))return 'Неверный текущий пароль';
+  if(requireCode&&row.totp_secret){const step=verifyTotp(row.totp_secret,String(req.body?.code||'').replace(/\s+/g,''),{lastCounter:row.totp_last_counter});if(step===null)return 'Неверный код подтверждения';db.prepare('UPDATE users SET totp_last_counter=? WHERE id=?').run(step,row.id)}
+  return null;
+};
+const identityLimited=(req,res)=>{const retry=loginLimiter.blocked(clientIp(req),req.user.email,{trusted:true});if(retry){res.set('Retry-After',String(retry));fail(res,429,'Слишком много попыток. Повторите позже');return true}return false};
+app.post('/api/me/password',auth,(req,res)=>{
+  if(identityLimited(req,res))return;
+  const row=currentUserRow(req),problem=confirmIdentity(req,row);
+  if(problem){loginLimiter.fail(clientIp(req),req.user.email);audit(req,'auth.password_change_failed',{details:problem});return fail(res,403,problem)}
+  if(!validNewPassword(req.body.new_password))return fail(res,400,'Новый пароль должен быть от 10 до 1024 символов');
+  if(verifyPassword(req.body.new_password,row.password_hash))return fail(res,400,'Новый пароль совпадает с текущим');
+  db.prepare('UPDATE users SET password_hash=?,password_changed_at=CURRENT_TIMESTAMP WHERE id=?').run(hashPassword(req.body.new_password),row.id);
+  const revoked=revokeSessions(row.id,req.sessionToken);
+  audit(req,'auth.password_changed',{target:`user:${row.id}`,details:`Завершено других сеансов: ${revoked}`});
+  res.json({ok:true,revoked_sessions:revoked});
+});
+app.post('/api/me/sessions/revoke-others',auth,(req,res)=>{const revoked=revokeSessions(req.user.id,req.sessionToken);audit(req,'auth.sessions_revoked',{target:`user:${req.user.id}`,details:`Завершено сеансов: ${revoked}`});res.json({ok:true,revoked_sessions:revoked})});
+app.get('/api/me/sessions',auth,(req,res)=>res.json({active:db.prepare('SELECT COUNT(*) n FROM sessions WHERE user_id=? AND expires_at>?').get(req.user.id,Date.now()).n}));
+app.post('/api/me/2fa/setup',auth,(req,res)=>{
+  if(identityLimited(req,res))return;
+  const row=currentUserRow(req);
+  if(row.totp_secret)return fail(res,409,'Двухфакторная защита уже включена');
+  const problem=confirmIdentity(req,row,{requireCode:false});
+  if(problem){loginLimiter.fail(clientIp(req),req.user.email);return fail(res,403,problem)}
+  const secret=newTotpSecret();
+  db.prepare('UPDATE users SET totp_pending_secret=? WHERE id=?').run(secret,row.id);
+  res.json({secret,otpauth_url:otpauthUrl(secret,row.email,db.prepare("SELECT value FROM app_settings WHERE key='name'").get()?.value||'OpenCRM')});
+});
+app.post('/api/me/2fa/enable',auth,(req,res)=>{
+  if(identityLimited(req,res))return;
+  const row=currentUserRow(req);
+  if(row.totp_secret)return fail(res,409,'Двухфакторная защита уже включена');
+  if(!row.totp_pending_secret)return fail(res,400,'Сначала получите секрет для приложения');
+  const step=verifyTotp(row.totp_pending_secret,String(req.body?.code||'').replace(/\s+/g,''));
+  if(step===null){loginLimiter.fail(clientIp(req),req.user.email);return fail(res,400,'Код не подошёл. Проверьте время на телефоне и попробуйте ещё раз')}
+  db.prepare('UPDATE users SET totp_secret=totp_pending_secret,totp_pending_secret=NULL,totp_last_counter=? WHERE id=?').run(step,row.id);
+  const revoked=revokeSessions(row.id,req.sessionToken);
+  audit(req,'auth.2fa_enabled',{target:`user:${row.id}`});
+  res.json({ok:true,totp_enabled:true,revoked_sessions:revoked});
+});
+app.post('/api/me/2fa/disable',auth,(req,res)=>{
+  if(identityLimited(req,res))return;
+  const row=currentUserRow(req);
+  if(!row.totp_secret)return fail(res,409,'Двухфакторная защита не включена');
+  const problem=confirmIdentity(req,row);
+  if(problem){loginLimiter.fail(clientIp(req),req.user.email);return fail(res,403,problem)}
+  db.prepare('UPDATE users SET totp_secret=NULL,totp_pending_secret=NULL,totp_last_counter=-1 WHERE id=?').run(row.id);
+  audit(req,'auth.2fa_disabled',{target:`user:${row.id}`});
+  res.json({ok:true,totp_enabled:false});
+});
 app.get('/api/search',auth,(req,res)=>{
   const q=value(req.query.q,120);
   if(q.length<2)return res.json({deals:[],contacts:[],companies:[]});
@@ -219,24 +309,81 @@ app.patch('/api/settings',auth,admin,(req,res) => { if(!required(req.body.name,1
 app.get('/api/user-groups',auth,(_req,res)=>res.json(db.prepare('SELECT g.id,g.name,COUNT(u.id) members FROM user_groups g LEFT JOIN users u ON u.group_id=g.id GROUP BY g.id ORDER BY g.name COLLATE NOCASE,g.id').all()));
 app.post('/api/user-groups',auth,admin,(req,res)=>{const name=value(req.body.name,120);if(!required(req.body.name,120))return fail(res,400,'Укажите название группы');if(db.prepare('SELECT id FROM user_groups WHERE lower(name)=lower(?)').get(name))return fail(res,409,'Такая группа уже есть');const r=db.prepare('INSERT INTO user_groups (name) VALUES (?)').run(name);res.status(201).json({id:r.lastInsertRowid,name,members:0})});
 app.patch('/api/user-groups/:id',auth,admin,(req,res)=>{const id=int(req.params.id),name=value(req.body.name,120);if(!idExists('user_groups',id))return fail(res,404,'Группа не найдена');if(!required(req.body.name,120))return fail(res,400,'Укажите название группы');if(db.prepare('SELECT id FROM user_groups WHERE lower(name)=lower(?) AND id<>?').get(name,id))return fail(res,409,'Такая группа уже есть');db.prepare('UPDATE user_groups SET name=? WHERE id=?').run(name,id);res.json({id,name})});
-app.get('/api/users',auth,(_req,res) => {
-  const rows=db.prepare('SELECT u.id,u.name,u.email,u.role,u.deal_access,u.task_access,u.contact_access,u.company_access,u.group_id,u.permissions_json,g.name group_name FROM users u LEFT JOIN user_groups g ON g.id=u.group_id ORDER BY u.name COLLATE NOCASE').all();
-  res.json(rows.map(({permissions_json,...user})=>({...user,permissions:parsePermissions(permissions_json)})));
+app.get('/api/users',auth,(req,res) => {
+  const rows=db.prepare('SELECT u.id,u.name,u.email,u.role,u.deal_access,u.task_access,u.contact_access,u.company_access,u.group_id,u.permissions_json,u.disabled_at,u.totp_secret,g.name group_name FROM users u LEFT JOIN user_groups g ON g.id=u.group_id ORDER BY u.name COLLATE NOCASE').all();
+  const isAdmin=req.user.role==='admin';
+  res.json(rows.map(({permissions_json,totp_secret,disabled_at,...user})=>({...user,disabled:!!disabled_at,...(isAdmin?{disabled_at,totp_enabled:!!totp_secret}:{}),permissions:normalizePermissions(parsePermissions(permissions_json))})));
 });
+const permissionSummary=permissions=>permissionEntities.map(entity=>`${entity}:${permissionActions.filter(action=>permissions[entity]?.[action]).join('/')||'—'}`).join('; ');
 app.post('/api/users',auth,admin,(req,res) => {
-  const {name,email,password,role='member',deal_access='all',task_access='all',contact_access='all',company_access='all'}=req.body,group=int(req.body.group_id),permissions=req.body.permissions??{};
-  if(!required(name,120)||!required(email,254)||!email.includes('@')||typeof password!=='string'||password.length<10||!['admin','member'].includes(role)||!['all','own'].includes(deal_access)||!['all','own'].includes(task_access)||!['all','own'].includes(contact_access)||!['all','own'].includes(company_access)||group&&!idExists('user_groups',group)||!validPermissions(permissions))return fail(res,400,'Проверьте данные сотрудника');
-  try{const result=db.prepare('INSERT INTO users (name,email,password_hash,role,deal_access,task_access,contact_access,company_access,group_id,permissions_json) VALUES (?,?,?,?,?,?,?,?,?,?)').run(name.trim(),email.trim().toLowerCase(),hashPassword(password),role,deal_access,task_access,contact_access,company_access,group,JSON.stringify(permissions));res.status(201).json({id:result.lastInsertRowid,name:name.trim(),email:email.trim().toLowerCase(),role,deal_access,task_access,contact_access,company_access,group_id:group,permissions})}
+  const {name,email,password,role='member',deal_access='all',task_access='all',contact_access='all',company_access='all'}=req.body,group=int(req.body.group_id),rawPermissions=req.body.permissions??{};
+  if(!required(name,120)||!required(email,254)||!email.includes('@')||!validNewPassword(password)||!['admin','member'].includes(role)||!['all','own'].includes(deal_access)||!['all','own'].includes(task_access)||!['all','own'].includes(contact_access)||!['all','own'].includes(company_access)||group&&!idExists('user_groups',group)||!validPermissions(rawPermissions))return fail(res,400,'Проверьте данные сотрудника');
+  const permissions=normalizePermissions(rawPermissions,defaultMemberPermissions());
+  try{const result=db.prepare('INSERT INTO users (name,email,password_hash,role,deal_access,task_access,contact_access,company_access,group_id,permissions_json,password_changed_at) VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)').run(name.trim(),email.trim().toLowerCase(),hashPassword(password),role,deal_access,task_access,contact_access,company_access,group,JSON.stringify(permissions));audit(req,'user.created',{target:`user:${result.lastInsertRowid} ${email.trim().toLowerCase()}`,details:`Роль: ${role}; права: ${permissionSummary(permissions)}`});res.status(201).json({id:result.lastInsertRowid,name:name.trim(),email:email.trim().toLowerCase(),role,deal_access,task_access,contact_access,company_access,group_id:group,permissions,disabled:false,totp_enabled:false})}
   catch(error){if(error.code==='SQLITE_CONSTRAINT_UNIQUE')return fail(res,409,'Email уже используется');throw error}
 });
 app.patch('/api/users/:id',auth,admin,(req,res)=>{
-  const id=int(req.params.id),old=db.prepare('SELECT id,role,deal_access,task_access,contact_access,company_access,group_id,permissions_json FROM users WHERE id=?').get(id);
+  const id=int(req.params.id),old=db.prepare('SELECT id,name,email,role,deal_access,task_access,contact_access,company_access,group_id,permissions_json,disabled_at FROM users WHERE id=?').get(id);
   if(!old)return fail(res,404,'Сотрудник не найден');
-  const {name,email,role}=req.body,dealAccess=req.body.deal_access??old.deal_access,taskAccess=req.body.task_access??old.task_access,contactAccess=req.body.contact_access??old.contact_access,companyAccess=req.body.company_access??old.company_access,group=int(Object.hasOwn(req.body,'group_id')?req.body.group_id:old.group_id),permissions=req.body.permissions??parsePermissions(old.permissions_json);
-  if(!required(name,120)||!required(email,254)||!email.includes('@')||!['admin','member'].includes(role)||!['all','own'].includes(dealAccess)||!['all','own'].includes(taskAccess)||!['all','own'].includes(contactAccess)||!['all','own'].includes(companyAccess)||group&&!idExists('user_groups',group)||!validPermissions(permissions))return fail(res,400,'Проверьте данные сотрудника');
-  if(old.role==='admin'&&role!=='admin'&&db.prepare("SELECT COUNT(*) n FROM users WHERE role='admin'").get().n<=1)return fail(res,409,'Нельзя убрать последнего администратора');
-  try{db.prepare('UPDATE users SET name=?,email=?,role=?,deal_access=?,task_access=?,contact_access=?,company_access=?,group_id=?,permissions_json=? WHERE id=?').run(name.trim(),email.trim().toLowerCase(),role,dealAccess,taskAccess,contactAccess,companyAccess,group,JSON.stringify(permissions),id);res.json({id,name:name.trim(),email:email.trim().toLowerCase(),role,deal_access:dealAccess,task_access:taskAccess,contact_access:contactAccess,company_access:companyAccess,group_id:group,permissions})}
+  const oldPermissions=normalizePermissions(parsePermissions(old.permissions_json));
+  const {name,email,role}=req.body,dealAccess=req.body.deal_access??old.deal_access,taskAccess=req.body.task_access??old.task_access,contactAccess=req.body.contact_access??old.contact_access,companyAccess=req.body.company_access??old.company_access,group=int(Object.hasOwn(req.body,'group_id')?req.body.group_id:old.group_id),rawPermissions=req.body.permissions??oldPermissions;
+  if(!required(name,120)||!required(email,254)||!email.includes('@')||!['admin','member'].includes(role)||!['all','own'].includes(dealAccess)||!['all','own'].includes(taskAccess)||!['all','own'].includes(contactAccess)||!['all','own'].includes(companyAccess)||group&&!idExists('user_groups',group)||!validPermissions(rawPermissions))return fail(res,400,'Проверьте данные сотрудника');
+  if(old.role==='admin'&&role!=='admin'&&!old.disabled_at&&activeAdminCount()<=1)return fail(res,409,'Нельзя убрать последнего администратора');
+  const permissions=normalizePermissions(rawPermissions,oldPermissions);
+  try{db.prepare('UPDATE users SET name=?,email=?,role=?,deal_access=?,task_access=?,contact_access=?,company_access=?,group_id=?,permissions_json=? WHERE id=?').run(name.trim(),email.trim().toLowerCase(),role,dealAccess,taskAccess,contactAccess,companyAccess,group,JSON.stringify(permissions),id);
+    const changes=[old.email!==email.trim().toLowerCase()&&`email: ${old.email} → ${email.trim().toLowerCase()}`,old.role!==role&&`роль: ${old.role} → ${role}`,[['сделки',old.deal_access,dealAccess],['задачи',old.task_access,taskAccess],['контакты',old.contact_access,contactAccess],['компании',old.company_access,companyAccess]].filter(([,a,b])=>a!==b).map(([label,a,b])=>`видимость ${label}: ${a} → ${b}`).join('; '),JSON.stringify(oldPermissions)!==JSON.stringify(permissions)&&`права: ${permissionSummary(permissions)}`].filter(Boolean);
+    if(changes.length)audit(req,'user.updated',{target:`user:${id} ${email.trim().toLowerCase()}`,details:changes.join('; ')});
+    res.json({id,name:name.trim(),email:email.trim().toLowerCase(),role,deal_access:dealAccess,task_access:taskAccess,contact_access:contactAccess,company_access:companyAccess,group_id:group,permissions})}
   catch(error){if(error.code==='SQLITE_CONSTRAINT_UNIQUE')return fail(res,409,'Email уже используется');throw error}
+});
+const managedUser=(req,res)=>{const user=db.prepare('SELECT * FROM users WHERE id=?').get(int(req.params.id));if(!user){fail(res,404,'Сотрудник не найден');return null}return user};
+app.post('/api/users/:id/disable',auth,admin,(req,res)=>{
+  const user=managedUser(req,res);if(!user)return;
+  if(user.id===req.user.id)return fail(res,409,'Нельзя отключить собственную учётную запись');
+  if(user.disabled_at)return fail(res,409,'Сотрудник уже отключён');
+  if(user.role==='admin'&&activeAdminCount()<=1)return fail(res,409,'Нельзя отключить последнего администратора');
+  const revoked=db.transaction(()=>{db.prepare('UPDATE users SET disabled_at=CURRENT_TIMESTAMP WHERE id=?').run(user.id);forgetDevices(user.id);return revokeSessions(user.id)})();
+  audit(req,'user.disabled',{target:`user:${user.id} ${user.email}`,details:`Завершено сеансов: ${revoked}`});
+  res.json({ok:true,disabled:true,revoked_sessions:revoked});
+});
+app.post('/api/users/:id/enable',auth,admin,(req,res)=>{
+  const user=managedUser(req,res);if(!user)return;
+  if(!user.disabled_at)return fail(res,409,'Сотрудник уже активен');
+  db.prepare('UPDATE users SET disabled_at=NULL WHERE id=?').run(user.id);
+  audit(req,'user.enabled',{target:`user:${user.id} ${user.email}`});
+  res.json({ok:true,disabled:false});
+});
+app.post('/api/users/:id/password',auth,admin,(req,res)=>{
+  const user=managedUser(req,res);if(!user)return;
+  if(user.id===req.user.id)return fail(res,409,'Свой пароль меняйте в разделе «Безопасность»');
+  if(!validNewPassword(req.body?.password))return fail(res,400,'Пароль должен быть от 10 до 1024 символов');
+  const revoked=db.transaction(()=>{db.prepare('UPDATE users SET password_hash=?,password_changed_at=CURRENT_TIMESTAMP WHERE id=?').run(hashPassword(req.body.password),user.id);forgetDevices(user.id);return revokeSessions(user.id)})();
+  audit(req,'user.password_reset',{target:`user:${user.id} ${user.email}`,details:`Завершено сеансов: ${revoked}`});
+  res.json({ok:true,revoked_sessions:revoked});
+});
+app.post('/api/users/:id/revoke-sessions',auth,admin,(req,res)=>{
+  const user=managedUser(req,res);if(!user)return;
+  const revoked=revokeSessions(user.id,user.id===req.user.id?req.sessionToken:undefined);
+  audit(req,'user.sessions_revoked',{target:`user:${user.id} ${user.email}`,details:`Завершено сеансов: ${revoked}`});
+  res.json({ok:true,revoked_sessions:revoked});
+});
+app.post('/api/users/:id/reset-2fa',auth,admin,(req,res)=>{
+  const user=managedUser(req,res);if(!user)return;
+  if(user.id===req.user.id)return fail(res,409,'Свою двухфакторную защиту отключайте в разделе «Безопасность»');
+  if(!user.totp_secret)return fail(res,409,'У сотрудника не включена двухфакторная защита');
+  const revoked=db.transaction(()=>{db.prepare('UPDATE users SET totp_secret=NULL,totp_pending_secret=NULL,totp_last_counter=-1 WHERE id=?').run(user.id);return revokeSessions(user.id)})();
+  audit(req,'user.2fa_reset',{target:`user:${user.id} ${user.email}`,details:`Завершено сеансов: ${revoked}`});
+  res.json({ok:true,revoked_sessions:revoked});
+});
+app.get('/api/audit-log',auth,admin,(req,res)=>{
+  const page=Math.min(Math.max(1,int(req.query.page)||1),10000),size=[25,50,100].includes(Number(req.query.page_size))?Number(req.query.page_size):50,prefix=value(req.query.action,40),q=value(req.query.q,120);
+  if(prefix&&!/^[a-z_.0-9]+$/.test(prefix))return fail(res,400,'Неверный фильтр');
+  const where="WHERE (?='' OR a.action=? OR a.action LIKE ? ESCAPE '\\') AND (?='' OR a.actor LIKE ? OR a.target LIKE ? OR a.details LIKE ? OR a.ip LIKE ?)";
+  const like=`%${q.replace(/[\\%_]/g,match=>'\\'+match)}%`;
+  const params=[prefix,prefix,`${prefix.replace(/_/g,'\\_')}.%`,q,like,like,like,like];
+  const total=db.prepare(`SELECT COUNT(*) n FROM audit_log a ${where}`).get(...params).n;
+  const items=db.prepare(`SELECT a.id,a.action,a.actor,a.target,a.details,a.ip,a.created_at,u.name user_name FROM audit_log a LEFT JOIN users u ON u.id=a.user_id ${where} ORDER BY a.id DESC LIMIT ? OFFSET ?`).all(...params,size,(page-1)*size);
+  res.json({items,total,page,page_size:size,pages:Math.max(1,Math.ceil(total/size))});
 });
 app.get('/api/custom-fields',auth,(req,res)=>{const type=value(req.query.entity_type,20);if(type&&!customTables[type])return fail(res,400,'Неизвестный тип записи');res.json(type?db.prepare('SELECT * FROM custom_fields WHERE entity_type=? ORDER BY sort_order,id').all(type):db.prepare('SELECT * FROM custom_fields ORDER BY entity_type,sort_order,id').all());});
 app.post('/api/custom-fields',auth,admin,(req,res)=>{const {entity_type,field_type}=req.body;const name=value(req.body.name,120),options=field_type==='select'?fieldOptions(req.body.options):[];if(!customTables[entity_type]||!['text','number','date','url','select'].includes(field_type)||!name||options===null)return fail(res,400,'Проверьте поле и варианты');if(db.prepare('SELECT id FROM custom_fields WHERE entity_type=? AND lower(name)=lower(?)').get(entity_type,name))return fail(res,409,'Поле с таким названием уже есть');const order=db.prepare('SELECT COUNT(*) n FROM custom_fields WHERE entity_type=?').get(entity_type).n;const optionsJson=JSON.stringify(options);const result=db.prepare('INSERT INTO custom_fields (entity_type,name,field_type,options_json,sort_order) VALUES (?,?,?,?,?)').run(entity_type,name,field_type,optionsJson,order);res.status(201).json({id:result.lastInsertRowid,entity_type,name,field_type,options_json:optionsJson,sort_order:order});});
@@ -303,6 +450,13 @@ app.post('/api/entities/bulk-delete',auth,(req,res)=>{
   db.transaction(()=>{const update=db.prepare(`UPDATE ${table} SET deleted_at=CURRENT_TIMESTAMP WHERE id=? AND deleted_at IS NULL`);for(const row of rows){update.run(row.id);entityEvent(kind,row.id,req.user.id,'Запись перемещена в корзину')}})();
   res.json({ok:true,deleted:rows.length});
 });
+const mb=(name,fallback)=>{const raw=Number(process.env[name]);return (Number.isFinite(raw)&&raw>0?raw:fallback)*1024*1024};
+const attachmentQuota=(userId,size)=>{
+  const total=db.prepare('SELECT COALESCE(SUM(byte_size),0) n FROM attachments').get().n,own=db.prepare('SELECT COALESCE(SUM(byte_size),0) n FROM attachments WHERE user_id=?').get(userId).n;
+  if(total+size>mb('ATTACHMENT_QUOTA_MB',10240))return 'Хранилище файлов заполнено. Обратитесь к администратору';
+  if(own+size>mb('ATTACHMENT_USER_QUOTA_MB',2048))return 'Превышена ваша квота на файлы. Удалите ненужные записи или обратитесь к администратору';
+  return null;
+};
 app.get('/api/files',auth,(req,res)=>{
   const page=Math.max(1,int(req.query.page)||1),size=[25,50,100].includes(Number(req.query.page_size))?Number(req.query.page_size):50,q=value(req.query.q,100).toLowerCase();
   const kind=value(req.query.kind,20)||'all';if(!['all','deal','contact','company'].includes(kind))return fail(res,400,'Неизвестный тип файла');
@@ -317,8 +471,8 @@ app.get('/api/file-targets',auth,(req,res)=>{
   const rows=kind==='deal'?db.prepare('SELECT id,name FROM deals WHERE deleted_at IS NULL AND (?=0 OR owner_id=?) AND lower(name) LIKE ? ORDER BY id DESC LIMIT 30').all(ownDeals(req)?1:0,req.user.id,`%${q}%`):db.prepare(`SELECT id,name FROM ${table} WHERE deleted_at IS NULL AND (?=0 OR owner_id=?) AND lower(name) LIKE ? ORDER BY id DESC LIMIT 30`).all((kind==='contact'?ownContacts(req):ownCompanies(req))?1:0,req.user.id,`%${q}%`);
   res.json(rows);
 });
-app.post('/api/attachments/:entity_type/:entity_id',auth,express.raw({type:'application/octet-stream',limit:'15mb'}),(req,res)=>{const type=req.params.entity_type,id=int(req.params.entity_id);if(!customTables[type]||!idExists(customTables[type],id))return fail(res,404,'Запись не найдена');if(!allowed(req,type,'edit'))return fail(res,403,'Нет прав на это действие');if(type==='deal'&&!dealAllowed(req,id))return fail(res,403,'Нет доступа к сделке');if(type!=='deal'&&!entityAllowed(req,type,id))return fail(res,403,'Нет доступа к записи');if(!Buffer.isBuffer(req.body)||!req.body.length)return fail(res,400,'Выберите непустой файл');let filename;try{filename=decodeURIComponent(String(req.get('x-file-name')||''))}catch{return fail(res,400,'Неверное имя файла')}filename=filename.split(/[\\/]/).pop().replace(/[\x00-\x1f\x7f]/g,'').trim();if(!filename||filename.length>255)return fail(res,400,'Неверное имя файла');const mime=value(req.get('x-file-type'),120)||'application/octet-stream';const stored=randomBytes(24).toString('hex');writeFileSync(resolve(uploadDir,stored),req.body,{flag:'wx',mode:0o600});try{const row=db.prepare('INSERT INTO attachments (entity_type,entity_id,user_id,filename,mime_type,byte_size,stored_name) VALUES (?,?,?,?,?,?,?)').run(type,id,req.user.id,filename,mime,req.body.length,stored);if(type==='deal')event(id,req.user.id,`Прикреплён файл «${filename}»`);else entityEvent(type,id,req.user.id,`Прикреплён файл «${filename}»`);res.status(201).json({id:row.lastInsertRowid,filename,byte_size:req.body.length})}catch(e){unlinkSync(resolve(uploadDir,stored));throw e}});
-app.get('/api/attachments/:id/download',auth,(req,res)=>{const file=db.prepare('SELECT * FROM attachments WHERE id=?').get(int(req.params.id));if(!file)return fail(res,404,'Файл не найден');if(!allowed(req,file.entity_type,'export'))return fail(res,403,'Нет прав на это действие');if(file.entity_type==='deal'&&!dealAllowed(req,file.entity_id))return fail(res,403,'Нет доступа к сделке');if(file.entity_type!=='deal'&&!entityAllowed(req,file.entity_type,file.entity_id))return fail(res,404,'Файл не найден');res.download(resolve(uploadDir,file.stored_name),file.filename)});
+app.post('/api/attachments/:entity_type/:entity_id',auth,express.raw({type:'application/octet-stream',limit:'15mb'}),(req,res)=>{const type=req.params.entity_type,id=int(req.params.entity_id);if(!customTables[type]||!idExists(customTables[type],id))return fail(res,404,'Запись не найдена');if(!allowed(req,type,'edit'))return fail(res,403,'Нет прав на это действие');if(type==='deal'&&!dealAllowed(req,id))return fail(res,403,'Нет доступа к сделке');if(type!=='deal'&&!entityAllowed(req,type,id))return fail(res,403,'Нет доступа к записи');if(!Buffer.isBuffer(req.body)||!req.body.length)return fail(res,400,'Выберите непустой файл');const quota=attachmentQuota(req.user.id,req.body.length);if(quota)return fail(res,413,quota);let filename;try{filename=decodeURIComponent(String(req.get('x-file-name')||''))}catch{return fail(res,400,'Неверное имя файла')}filename=filename.split(/[\\/]/).pop().replace(/[\x00-\x1f\x7f]/g,'').trim();if(!filename||filename.length>255)return fail(res,400,'Неверное имя файла');const mime=value(req.get('x-file-type'),120)||'application/octet-stream';const stored=randomBytes(24).toString('hex');writeFileSync(resolve(uploadDir,stored),req.body,{flag:'wx',mode:0o600});try{const row=db.prepare('INSERT INTO attachments (entity_type,entity_id,user_id,filename,mime_type,byte_size,stored_name) VALUES (?,?,?,?,?,?,?)').run(type,id,req.user.id,filename,mime,req.body.length,stored);if(type==='deal')event(id,req.user.id,`Прикреплён файл «${filename}»`);else entityEvent(type,id,req.user.id,`Прикреплён файл «${filename}»`);res.status(201).json({id:row.lastInsertRowid,filename,byte_size:req.body.length})}catch(e){unlinkSync(resolve(uploadDir,stored));throw e}});
+app.get('/api/attachments/:id/download',auth,(req,res)=>{const file=db.prepare('SELECT * FROM attachments WHERE id=?').get(int(req.params.id));if(!file)return fail(res,404,'Файл не найден');if(!allowed(req,file.entity_type,'export'))return fail(res,403,'Нет прав на это действие');if(file.entity_type==='deal'&&!dealAllowed(req,file.entity_id))return fail(res,403,'Нет доступа к сделке');if(file.entity_type!=='deal'&&!entityAllowed(req,file.entity_type,file.entity_id))return fail(res,404,'Файл не найден');audit(req,'attachment.downloaded',{target:`${file.entity_type}:${file.entity_id}`,details:file.filename});res.download(resolve(uploadDir,file.stored_name),file.filename)});
 app.get('/api/pipelines',auth,(_req,res) => res.json(db.prepare('SELECT * FROM pipelines ORDER BY sort_order,id').all()));
 app.post('/api/pipelines',auth,admin,(req,res) => { if (!required(req.body.name,120)) return fail(res,400,'Укажите название'); const r=db.prepare('INSERT INTO pipelines (name,sort_order) VALUES (?,?)').run(req.body.name.trim(),db.prepare('SELECT COUNT(*) n FROM pipelines').get().n); const stage=db.prepare('INSERT INTO stages (pipeline_id,name,color,sort_order,kind) VALUES (?,?,?,?,?)'); [['Новый лид','#f5e768','active'],['В работе','#bcd3f6','active'],['Успешно реализовано','#a9ddb1','won'],['Закрыто и не реализовано','#e8b7b7','lost']].forEach(([name,color,kind],i)=>stage.run(r.lastInsertRowid,name,color,i,kind)); res.status(201).json({id:r.lastInsertRowid,name:req.body.name.trim()}); });
 app.patch('/api/pipelines/:id',auth,admin,(req,res)=>{const id=int(req.params.id);if(!idExists('pipelines',id))return fail(res,404,'Воронка не найдена');if(!required(req.body.name,120))return fail(res,400,'Укажите название');const name=req.body.name.trim();db.prepare('UPDATE pipelines SET name=? WHERE id=?').run(name,id);res.json({id,name})});
@@ -331,15 +485,21 @@ app.put('/api/stages/:id/automation',auth,admin,(req,res)=>{const id=int(req.par
 app.delete('/api/stages/:id/automation',auth,admin,(req,res)=>{const id=int(req.params.id);if(!idExists('stages',id))return fail(res,404,'Этап не найден');db.prepare('DELETE FROM stage_automations WHERE stage_id=?').run(id);res.json({ok:true})});
 app.get('/api/inbox',auth,(req,res)=>{const pid=int(req.query.pipeline_id),state=value(req.query.state,20)||'pending';if(!idExists('pipelines',pid))return fail(res,400,'Укажите воронку');if(!['pending','accepted','rejected','all'].includes(state))return fail(res,400,'Неверный статус');res.json(db.prepare(`SELECT l.*,u.name resolved_by_name FROM inbox_leads l LEFT JOIN users u ON u.id=l.resolved_by WHERE l.pipeline_id=? ${state==='all'?'':'AND l.status=?'} AND (?=0 OR l.status='pending' OR l.resolved_by=?) ORDER BY l.id DESC LIMIT 500`).all(...(state==='all'?[pid,ownDeals(req)?1:0,req.user.id]:[pid,state,ownDeals(req)?1:0,req.user.id])))});
 app.post('/api/inbox',auth,requirePermission('deal','create'),(req,res)=>{const pid=int(req.body.pipeline_id),title=value(req.body.title,255),contactName=value(req.body.contact_name,255),companyName=value(req.body.company_name,255),email=value(req.body.email,254),phone=value(req.body.phone,80);if(!idExists('pipelines',pid)||!title||(!contactName&&!companyName&&!email&&!phone)||email&&!email.includes('@'))return fail(res,400,'Проверьте данные заявки');const result=db.prepare('INSERT INTO inbox_leads (pipeline_id,title,contact_name,company_name,phone,email,website,source,message,created_by) VALUES (?,?,?,?,?,?,?,?,?,?)').run(pid,title,contactName,companyName,phone,email.toLowerCase(),value(req.body.website,255),value(req.body.source,255)||'Вручную',value(req.body.message,10000),req.user.id);res.status(201).json({id:result.lastInsertRowid})});
-app.post('/api/inbox/:id/accept',auth,requirePermission('deal','create'),(req,res)=>{const id=int(req.params.id),lead=db.prepare('SELECT * FROM inbox_leads WHERE id=?').get(id);if(!lead)return fail(res,404,'Заявка не найдена');if(lead.status!=='pending')return fail(res,409,'Заявка уже обработана');const stage=int(req.body.stage_id),stageRow=db.prepare('SELECT pipeline_id,kind FROM stages WHERE id=?').get(stage),owner=int(req.body.owner_id)||req.user.id;if(!stageRow||stageRow.pipeline_id!==lead.pipeline_id||stageRow.kind!=='active'||!idExists('users',owner))return fail(res,400,'Выберите рабочий этап этой воронки');if(ownDeals(req)&&owner!==req.user.id)return fail(res,403,'Можно назначать только себе');if(lead.company_name&&!allowed(req,'company','create')&&!db.prepare('SELECT id FROM companies WHERE deleted_at IS NULL AND lower(name)=lower(?) LIMIT 1').get(lead.company_name))return fail(res,403,'Нет прав на создание компании');if((lead.contact_name||lead.email||lead.phone)&&!allowed(req,'contact','create')){const existing=lead.email?db.prepare("SELECT id FROM contacts WHERE deleted_at IS NULL AND lower(email)=lower(?) AND email<>'' ORDER BY id LIMIT 1").get(lead.email):lead.phone?db.prepare("SELECT id FROM contacts WHERE deleted_at IS NULL AND phone=? AND phone<>'' ORDER BY id LIMIT 1").get(lead.phone):null;if(!existing)return fail(res,403,'Нет прав на создание контакта')}const dealId=db.transaction(()=>{let companyId=null,contactId=null;if(lead.company_name){const existing=db.prepare('SELECT id FROM companies WHERE deleted_at IS NULL AND lower(name)=lower(?) ORDER BY id LIMIT 1').get(lead.company_name);companyId=existing?.id||(()=>{const created=db.prepare('INSERT INTO companies (name,owner_id,website) VALUES (?,?,?)').run(lead.company_name,owner,lead.website).lastInsertRowid;entityEvent('company',created,req.user.id,'Компания создана из входящей заявки');return created})()}if(lead.contact_name||lead.email||lead.phone){const existing=lead.email?db.prepare("SELECT id FROM contacts WHERE deleted_at IS NULL AND lower(email)=lower(?) AND email<>'' ORDER BY id LIMIT 1").get(lead.email):lead.phone?db.prepare("SELECT id FROM contacts WHERE deleted_at IS NULL AND phone=? AND phone<>'' ORDER BY id LIMIT 1").get(lead.phone):null;contactId=existing?.id||(()=>{const created=db.prepare('INSERT INTO contacts (name,company_id,owner_id,phone,email) VALUES (?,?,?,?,?)').run(lead.contact_name||lead.email||lead.phone,companyId,owner,lead.phone,lead.email).lastInsertRowid;entityEvent('contact',created,req.user.id,'Контакт создан из входящей заявки');return created})()}const deal=db.prepare('INSERT INTO deals (name,stage_id,company_id,contact_id,owner_id,source,description) VALUES (?,?,?,?,?,?,?)').run(lead.title,stage,companyId,contactId,owner,lead.source,lead.message);db.prepare("UPDATE inbox_leads SET status='accepted',deal_id=?,resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?").run(deal.lastInsertRowid,req.user.id,id);if(contactId)db.prepare('INSERT OR IGNORE INTO deal_contacts (deal_id,contact_id) VALUES (?,?)').run(deal.lastInsertRowid,contactId);event(deal.lastInsertRowid,req.user.id,`Заявка #${id} принята`);runStageAutomation(deal.lastInsertRowid,stage,owner,req.user.id);return deal.lastInsertRowid})();res.json({ok:true,deal_id:dealId})});
-app.post('/api/inbox/:id/reject',auth,(req,res)=>{const id=int(req.params.id),lead=db.prepare('SELECT status FROM inbox_leads WHERE id=?').get(id);if(!lead)return fail(res,404,'Заявка не найдена');if(lead.status!=='pending')return fail(res,409,'Заявка уже обработана');db.prepare("UPDATE inbox_leads SET status='rejected',resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?").run(req.user.id,id);res.json({ok:true})});
-app.post('/api/inbox/:id/restore',auth,(req,res)=>{const id=int(req.params.id),lead=db.prepare('SELECT status,resolved_by FROM inbox_leads WHERE id=?').get(id);if(!lead)return fail(res,404,'Заявка не найдена');if(ownDeals(req)&&lead.resolved_by!==req.user.id)return fail(res,403,'Нет доступа к заявке');if(lead.status!=='rejected')return fail(res,409,'Можно восстановить только отклонённую заявку');db.prepare("UPDATE inbox_leads SET status='pending',resolved_by=NULL,resolved_at=NULL WHERE id=?").run(id);res.json({ok:true})});
+// Matching an incoming lead to existing records respects the employee's visibility, otherwise an
+// "own records" user could attach (and learn the names of) colleagues' contacts by email or phone.
+const findLeadCompany=(req,name)=>db.prepare('SELECT id FROM companies WHERE deleted_at IS NULL AND lower(name)=lower(?) AND (?=0 OR owner_id=?) ORDER BY id LIMIT 1').get(name,ownCompanies(req)?1:0,req.user.id);
+const findLeadContact=(req,lead)=>{const own=ownContacts(req)?1:0;if(lead.email)return db.prepare("SELECT id FROM contacts WHERE deleted_at IS NULL AND lower(email)=lower(?) AND email<>'' AND (?=0 OR owner_id=?) ORDER BY id LIMIT 1").get(lead.email,own,req.user.id);if(lead.phone)return db.prepare("SELECT id FROM contacts WHERE deleted_at IS NULL AND phone=? AND phone<>'' AND (?=0 OR owner_id=?) ORDER BY id LIMIT 1").get(lead.phone,own,req.user.id);return null};
+app.post('/api/inbox/:id/accept',auth,requirePermission('deal','create'),(req,res)=>{const id=int(req.params.id),lead=db.prepare('SELECT * FROM inbox_leads WHERE id=?').get(id);if(!lead)return fail(res,404,'Заявка не найдена');if(lead.status!=='pending')return fail(res,409,'Заявка уже обработана');const stage=int(req.body.stage_id),stageRow=db.prepare('SELECT pipeline_id,kind FROM stages WHERE id=?').get(stage),owner=int(req.body.owner_id)||req.user.id;if(!stageRow||stageRow.pipeline_id!==lead.pipeline_id||stageRow.kind!=='active'||!idExists('users',owner))return fail(res,400,'Выберите рабочий этап этой воронки');if(ownDeals(req)&&owner!==req.user.id)return fail(res,403,'Можно назначать только себе');if(lead.company_name&&!allowed(req,'company','create')&&!findLeadCompany(req,lead.company_name))return fail(res,403,'Нет прав на создание компании');if((lead.contact_name||lead.email||lead.phone)&&!allowed(req,'contact','create')){const existing=findLeadContact(req,lead);if(!existing)return fail(res,403,'Нет прав на создание контакта')}const dealId=db.transaction(()=>{let companyId=null,contactId=null;if(lead.company_name){const existing=findLeadCompany(req,lead.company_name);companyId=existing?.id||(()=>{const created=db.prepare('INSERT INTO companies (name,owner_id,website) VALUES (?,?,?)').run(lead.company_name,owner,lead.website).lastInsertRowid;entityEvent('company',created,req.user.id,'Компания создана из входящей заявки');return created})()}if(lead.contact_name||lead.email||lead.phone){const existing=findLeadContact(req,lead);contactId=existing?.id||(()=>{const created=db.prepare('INSERT INTO contacts (name,company_id,owner_id,phone,email) VALUES (?,?,?,?,?)').run(lead.contact_name||lead.email||lead.phone,companyId,owner,lead.phone,lead.email).lastInsertRowid;entityEvent('contact',created,req.user.id,'Контакт создан из входящей заявки');return created})()}const deal=db.prepare('INSERT INTO deals (name,stage_id,company_id,contact_id,owner_id,source,description) VALUES (?,?,?,?,?,?,?)').run(lead.title,stage,companyId,contactId,owner,lead.source,lead.message);db.prepare("UPDATE inbox_leads SET status='accepted',deal_id=?,resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?").run(deal.lastInsertRowid,req.user.id,id);if(contactId)db.prepare('INSERT OR IGNORE INTO deal_contacts (deal_id,contact_id) VALUES (?,?)').run(deal.lastInsertRowid,contactId);event(deal.lastInsertRowid,req.user.id,`Заявка #${id} принята`);runStageAutomation(deal.lastInsertRowid,stage,owner,req.user.id);return deal.lastInsertRowid})();res.json({ok:true,deal_id:dealId})});
+app.post('/api/inbox/:id/reject',auth,requirePermission('deal','create'),(req,res)=>{const id=int(req.params.id),lead=db.prepare('SELECT status,title FROM inbox_leads WHERE id=?').get(id);if(!lead)return fail(res,404,'Заявка не найдена');if(lead.status!=='pending')return fail(res,409,'Заявка уже обработана');db.prepare("UPDATE inbox_leads SET status='rejected',resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?").run(req.user.id,id);audit(req,'inbox.rejected',{target:`lead:${id}`,details:lead.title});res.json({ok:true})});
+app.delete('/api/inbox/:id',auth,admin,(req,res)=>{const id=int(req.params.id),lead=db.prepare('SELECT id,title FROM inbox_leads WHERE id=?').get(id);if(!lead)return fail(res,404,'Заявка не найдена');db.prepare('DELETE FROM inbox_leads WHERE id=?').run(id);audit(req,'inbox.purged',{target:`lead:${id}`,details:lead.title});res.json({ok:true})});
+app.post('/api/inbox/:id/restore',auth,requirePermission('deal','create'),(req,res)=>{const id=int(req.params.id),lead=db.prepare('SELECT status,resolved_by FROM inbox_leads WHERE id=?').get(id);if(!lead)return fail(res,404,'Заявка не найдена');if(ownDeals(req)&&lead.resolved_by!==req.user.id)return fail(res,403,'Нет доступа к заявке');if(lead.status!=='rejected')return fail(res,409,'Можно восстановить только отклонённую заявку');db.prepare("UPDATE inbox_leads SET status='pending',resolved_by=NULL,resolved_at=NULL WHERE id=?").run(id);res.json({ok:true})});
 app.get('/api/pipelines/:id/forms',auth,(req,res)=>{const pid=int(req.params.id);if(!idExists('pipelines',pid))return fail(res,404,'Воронка не найдена');res.json(db.prepare('SELECT id,pipeline_id,title,token,active,created_at FROM lead_forms WHERE pipeline_id=? ORDER BY id DESC').all(pid))});
 app.post('/api/pipelines/:id/forms',auth,admin,(req,res)=>{const pid=int(req.params.id),title=value(req.body.title,120);if(!idExists('pipelines',pid))return fail(res,404,'Воронка не найдена');if(!title)return fail(res,400,'Укажите название формы');const token=randomBytes(24).toString('hex');const row=db.prepare('INSERT INTO lead_forms (pipeline_id,title,token) VALUES (?,?,?)').run(pid,title,token);res.status(201).json({id:row.lastInsertRowid,pipeline_id:pid,title,token,active:1})});
 app.patch('/api/forms/:id',auth,admin,(req,res)=>{const id=int(req.params.id),form=db.prepare('SELECT * FROM lead_forms WHERE id=?').get(id);if(!form)return fail(res,404,'Форма не найдена');const title=value(req.body.title,120),active=req.body.active;if(!title||typeof active!=='boolean')return fail(res,400,'Проверьте настройки формы');db.prepare('UPDATE lead_forms SET title=?,active=? WHERE id=?').run(title,active?1:0,id);res.json({id,title,active:active?1:0})});
 const publicFormRates=new Map();
+const prunePublicFormRates=now=>{if(publicFormRates.size<5000)return;for(const [key,times] of publicFormRates)if(!times.some(time=>now-time<60000))publicFormRates.delete(key);while(publicFormRates.size>=5000)publicFormRates.delete(publicFormRates.keys().next().value)};
 app.get('/api/public/forms/:token',(req,res)=>{const form=db.prepare('SELECT title FROM lead_forms WHERE token=? AND active=1').get(req.params.token);if(!form)return fail(res,404,'Форма не найдена');res.json(form)});
-app.post('/api/public/forms/:token',(req,res)=>{const form=db.prepare('SELECT * FROM lead_forms WHERE token=? AND active=1').get(req.params.token);if(!form)return fail(res,404,'Форма не найдена');const key=req.ip+':'+form.id,now=Date.now(),recent=(publicFormRates.get(key)||[]).filter(t=>now-t<60000);if(recent.length>=20)return fail(res,429,'Слишком много отправок. Повторите позже');recent.push(now);publicFormRates.set(key,recent);if(req.body.website_hidden)return res.status(201).json({ok:true});const contactName=value(req.body.contact_name,255),companyName=value(req.body.company_name,255),phone=value(req.body.phone,80),email=value(req.body.email,254),title=value(req.body.title,255)||`Заявка: ${form.title}`;if((!contactName&&!companyName&&!phone&&!email)||(email&&!email.includes('@'))||!title)return fail(res,400,'Укажите контактные данные');const result=db.prepare('INSERT INTO inbox_leads (pipeline_id,title,contact_name,company_name,phone,email,website,source,message) VALUES (?,?,?,?,?,?,?,?,?)').run(form.pipeline_id,title,contactName,companyName,phone,email.toLowerCase(),value(req.body.website,255),`Форма: ${form.title}`.slice(0,255),value(req.body.message,10000));res.status(201).json({ok:true,id:result.lastInsertRowid})});
+app.post('/api/public/forms/:token',(req,res)=>{const form=db.prepare('SELECT * FROM lead_forms WHERE token=? AND active=1').get(req.params.token);if(!form)return fail(res,404,'Форма не найдена');const key=req.ip+':'+form.id,now=Date.now(),recent=(publicFormRates.get(key)||[]).filter(t=>now-t<60000);if(recent.length>=20)return fail(res,429,'Слишком много отправок. Повторите позже');recent.push(now);prunePublicFormRates(now);publicFormRates.set(key,recent);if(req.body.website_hidden)return res.status(201).json({ok:true});const contactName=value(req.body.contact_name,255),companyName=value(req.body.company_name,255),phone=value(req.body.phone,80),email=value(req.body.email,254),title=value(req.body.title,255)||`Заявка: ${form.title}`;if((!contactName&&!companyName&&!phone&&!email)||(email&&!email.includes('@'))||!title)return fail(res,400,'Укажите контактные данные');const result=db.prepare('INSERT INTO inbox_leads (pipeline_id,title,contact_name,company_name,phone,email,website,source,message) VALUES (?,?,?,?,?,?,?,?,?)').run(form.pipeline_id,title,contactName,companyName,phone,email.toLowerCase(),value(req.body.website,255),`Форма: ${form.title}`.slice(0,255),value(req.body.message,10000));res.status(201).json({ok:true,id:result.lastInsertRowid})});
 
 app.get('/api/entity-list',auth,(req,res)=>{
   const kind=value(req.query.kind,20),page=Number(req.query.page||1),size=Number(req.query.page_size||50),q=value(req.query.q,120),owner=value(req.query.owner_id,30),tag=value(req.query.tag,120),preset=value(req.query.preset,20),createdFrom=value(req.query.created_from,10),createdTo=value(req.query.created_to,10);
@@ -350,12 +510,14 @@ app.get('/api/entity-list',auth,(req,res)=>{
   const dateSql=alias=>`${createdFrom?` AND date(${alias}.created_at)>=?`:''}${createdTo?` AND date(${alias}.created_at)<=?`:''}`;
   const visibleDeal=ownDeals(req)?` AND d.owner_id=${req.user.id}`:'';
   const visibleTask=`${ownTasks(req)?` AND t.owner_id=${req.user.id}`:''}${ownDeals(req)?` AND (t.deal_id IS NULL OR EXISTS(SELECT 1 FROM deals d WHERE d.id=t.deal_id AND d.deleted_at IS NULL AND d.owner_id=${req.user.id}))`:''}`;
-  const contactDeal=`EXISTS(SELECT 1 FROM deals d WHERE d.deleted_at IS NULL${visibleDeal} AND (d.contact_id=c.id OR EXISTS(SELECT 1 FROM deal_contacts dc WHERE dc.deal_id=d.id AND dc.contact_id=c.id)))`;
+  // Each EXISTS starts from an indexed column (deals.contact_id, deal_contacts.contact_id, tasks.deal_id...).
+  // An OR inside one EXISTS made SQLite scan every deal for every contact (quadratic, blocked the server).
+  const contactDeal=`(EXISTS(SELECT 1 FROM deals d WHERE d.contact_id=c.id AND d.deleted_at IS NULL${visibleDeal}) OR EXISTS(SELECT 1 FROM deal_contacts dc JOIN deals d ON d.id=dc.deal_id WHERE dc.contact_id=c.id AND d.deleted_at IS NULL${visibleDeal}))`;
   const companyDeal=`EXISTS(SELECT 1 FROM deals d WHERE d.deleted_at IS NULL${visibleDeal} AND d.company_id=co.id)`;
   const dueTask=preset==='overdue'?" AND t.due_at IS NOT NULL AND julianday(t.due_at)<julianday('now')":'';
   const openTask=`t.deleted_at IS NULL AND t.completed_at IS NULL${visibleTask}${dueTask}`;
-  const contactTask=`(EXISTS(SELECT 1 FROM tasks t WHERE t.contact_id=c.id AND ${openTask}) OR EXISTS(SELECT 1 FROM deals d JOIN tasks t ON t.deal_id=d.id WHERE d.deleted_at IS NULL AND (d.contact_id=c.id OR EXISTS(SELECT 1 FROM deal_contacts dc WHERE dc.deal_id=d.id AND dc.contact_id=c.id)) AND ${openTask}))`;
-  const companyTask=`(EXISTS(SELECT 1 FROM tasks t WHERE t.company_id=co.id AND ${openTask}) OR EXISTS(SELECT 1 FROM deals d JOIN tasks t ON t.deal_id=d.id WHERE d.deleted_at IS NULL AND d.company_id=co.id AND ${openTask}))`;
+  const contactTask=`(EXISTS(SELECT 1 FROM tasks t WHERE t.contact_id=c.id AND ${openTask}) OR EXISTS(SELECT 1 FROM deals d CROSS JOIN tasks t ON t.deal_id=d.id WHERE d.contact_id=c.id AND d.deleted_at IS NULL AND ${openTask}) OR EXISTS(SELECT 1 FROM deal_contacts dc CROSS JOIN deals d ON d.id=dc.deal_id CROSS JOIN tasks t ON t.deal_id=d.id WHERE dc.contact_id=c.id AND d.deleted_at IS NULL AND ${openTask}))`;
+  const companyTask=`(EXISTS(SELECT 1 FROM tasks t WHERE t.company_id=co.id AND ${openTask}) OR EXISTS(SELECT 1 FROM deals d CROSS JOIN tasks t ON t.deal_id=d.id WHERE d.company_id=co.id AND d.deleted_at IS NULL AND ${openTask}))`;
   const presetSql=(deal,task)=>preset==='no_deals'?` AND NOT ${deal}`:preset==='no_tasks'?` AND NOT ${task}`:preset==='overdue'?` AND ${task}`:'';
   const contacts=`SELECT c.id,c.name,c.company_id,COALESCE(co.name,'') company_name,c.owner_id,COALESCE(u.name,'') owner_name,c.phone,c.email,'' website,c.position,c.tags,c.created_at,(SELECT json_group_object(v.field_id,v.value) FROM custom_field_values v JOIN custom_fields f ON f.id=v.field_id AND f.entity_type='contact' WHERE v.entity_id=c.id) custom_values,'contact' _kind FROM contacts c LEFT JOIN companies co ON co.id=c.company_id AND co.deleted_at IS NULL AND (${ownCompanies(req)?1:0}=0 OR co.owner_id=${req.user.id}) LEFT JOIN users u ON u.id=c.owner_id WHERE c.deleted_at IS NULL${ownContacts(req)?` AND c.owner_id=${req.user.id}`:''} AND (c.name LIKE ? OR c.email LIKE ? OR c.phone LIKE ? OR co.name LIKE ? OR c.tags LIKE ?)${ownerSql('c')}${tagSql('c')}${dateSql('c')}${presetSql(contactDeal,contactTask)}`;
   const companies=`SELECT co.id,co.name,NULL company_id,'' company_name,co.owner_id,COALESCE(u.name,'') owner_name,co.phone,co.email,co.website,'' position,co.tags,co.created_at,(SELECT json_group_object(v.field_id,v.value) FROM custom_field_values v JOIN custom_fields f ON f.id=v.field_id AND f.entity_type='company' WHERE v.entity_id=co.id) custom_values,'company' _kind FROM companies co LEFT JOIN users u ON u.id=co.owner_id WHERE co.deleted_at IS NULL${ownCompanies(req)?` AND co.owner_id=${req.user.id}`:''} AND (co.name LIKE ? OR co.email LIKE ? OR co.phone LIKE ? OR co.website LIKE ? OR co.tags LIKE ?)${ownerSql('co')}${tagSql('co')}${dateSql('co')}${presetSql(companyDeal,companyTask)}`;
@@ -693,12 +855,15 @@ app.get('/api/analytics',auth,(req,res) => {
   const contacts=db.prepare('SELECT COUNT(*) n FROM contacts WHERE deleted_at IS NULL AND substr(created_at,1,10) BETWEEN ? AND ?').get(...range).n;
   res.json({from,to,stages:stageRows,created,new_deals:newDeals,people,events,sources,new_contacts:contacts});
 });
-app.get('/api/export/deals.csv',auth,requirePermission('deal','export'),(req,res) => { const rows=db.prepare(`${dealSelect(req)} WHERE d.deleted_at IS NULL AND (?=0 OR d.owner_id=?) ORDER BY d.id`).all(ownDeals(req)?1:0,req.user.id); const fields=['id','name','stage_name','loss_reason','amount','company_name','contact_name','owner_name','source','tags','description']; res.type('text/csv; charset=utf-8').set('Content-Disposition','attachment; filename="deals.csv"').send('\uFEFF'+[fields.join(','),...rows.map(r=>fields.map(f=>quoteCsvCell(r[f])).join(','))].join('\r\n')); });
+app.get('/api/export/deals.csv',auth,requirePermission('deal','export'),(req,res) => { const rows=db.prepare(`${dealSelect(req)} WHERE d.deleted_at IS NULL AND (?=0 OR d.owner_id=?) ORDER BY d.id`).all(ownDeals(req)?1:0,req.user.id); const fields=['id','name','stage_name','loss_reason','amount','company_name','contact_name','owner_name','source','tags','description']; audit(req,'export.deals',{details:`Строк: ${rows.length}`});res.type('text/csv; charset=utf-8').set('Content-Disposition','attachment; filename="deals.csv"').send('\uFEFF'+[fields.join(','),...rows.map(r=>fields.map(f=>quoteCsvCell(r[f])).join(','))].join('\r\n')); });
+// A single import runs in one synchronous transaction, so its size is capped to keep the server responsive.
+const importMaxRows=()=>{const raw=Number(process.env.IMPORT_MAX_ROWS);return Number.isSafeInteger(raw)&&raw>0?raw:5000};
 app.post('/api/import/deals.csv',auth,requirePermission('deal','create'),(req,res) => {
   const pid=int(req.body.pipeline_id);
   if(!idExists('pipelines',pid)||typeof req.body.csv!=='string'||req.body.csv.length>900000)return fail(res,400,'Неверный CSV или воронка');
   let rows;try{rows=parseCsv(req.body.csv)}catch(e){return fail(res,400,e.message)}
   if(rows.length<2)return fail(res,400,'CSV должен содержать заголовок и хотя бы одну строку');
+  if(rows.length-1>importMaxRows())return fail(res,413,`За один раз можно импортировать не больше ${importMaxRows()} строк. Разделите файл на части`);
   const aliases={name:['name','название','название сделки','сделка'],stage:['stage_name','этап','статус'],lossReason:['loss_reason','причина отказа'],amount:['amount','бюджет','сумма','цена'],company:['company_name','компания'],contact:['contact_name','контакт'],owner:['owner_name','ответственный'],source:['source','источник'],tags:['tags','теги'],description:['description','описание']};
   const header=rows[0].map(x=>x.trim().toLowerCase());
   const index=Object.fromEntries(Object.entries(aliases).map(([key,names])=>[key,header.findIndex(h=>names.includes(h))]));
@@ -725,13 +890,14 @@ app.post('/api/import/deals.csv',auth,requirePermission('deal','create'),(req,re
     const result=insertDeal.run(name,stage.id,company,contact,owner,moneyValue,col('source').slice(0,255),col('tags').slice(0,1000),col('description').slice(0,10000),stage.kind==='lost'?col('lossReason').slice(0,120):'');
     if(contact)db.prepare('INSERT OR IGNORE INTO deal_contacts (deal_id,contact_id) VALUES (?,?)').run(result.lastInsertRowid,contact);event(result.lastInsertRowid,req.user.id,'Сделка импортирована из CSV');count++;
   }return count});
-  const count=imported();res.json({imported:count,skipped:rows.length-1-count});
+  const count=imported();audit(req,'import.deals',{details:`Импортировано: ${count}`});res.json({imported:count,skipped:rows.length-1-count});
 });
 const entityCsv={contacts:{table:'contacts',fields:['id','name','company_name','position','phone','email','notes','tags','owner_name','created_at'],aliases:{name:['name','имя','имя контакта','контакт'],company:['company_name','компания'],position:['position','должность'],phone:['phone','телефон'],email:['email','почта','e-mail'],notes:['notes','примечание','описание'],tags:['tags','теги'],owner:['owner_name','ответственный']}},companies:{table:'companies',fields:['id','name','website','phone','email','notes','tags','owner_name','created_at'],aliases:{name:['name','название','название компании','компания'],website:['website','сайт'],phone:['phone','телефон'],email:['email','почта','e-mail'],notes:['notes','примечание','описание'],tags:['tags','теги'],owner:['owner_name','ответственный']}}};
 app.get('/api/export/:kind.csv',auth,(req,res)=>{
   const config=entityCsv[req.params.kind];if(!config)return fail(res,404,'Неизвестный список');
   if(!allowed(req,config.table==='contacts'?'contact':'company','export'))return fail(res,403,'Нет прав на это действие');
   const rows=req.params.kind==='contacts'?db.prepare(`SELECT c.*,co.name company_name,u.name owner_name FROM contacts c LEFT JOIN companies co ON co.id=c.company_id AND co.deleted_at IS NULL AND (${ownCompanies(req)?1:0}=0 OR co.owner_id=${req.user.id}) LEFT JOIN users u ON u.id=c.owner_id WHERE c.deleted_at IS NULL AND (?=0 OR c.owner_id=?) ORDER BY c.id`).all(ownContacts(req)?1:0,req.user.id):db.prepare('SELECT co.*,u.name owner_name FROM companies co LEFT JOIN users u ON u.id=co.owner_id WHERE co.deleted_at IS NULL AND (?=0 OR co.owner_id=?) ORDER BY co.id').all(ownCompanies(req)?1:0,req.user.id);
+  audit(req,`export.${req.params.kind}`,{details:`Строк: ${rows.length}`});
   res.type('text/csv; charset=utf-8').set('Content-Disposition',`attachment; filename="${req.params.kind}.csv"`).send('\uFEFF'+[config.fields.join(','),...rows.map(row=>config.fields.map(field=>quoteCsvCell(row[field])).join(','))].join('\r\n'));
 });
 app.post('/api/import/:kind.csv',auth,(req,res)=>{
@@ -740,6 +906,7 @@ app.post('/api/import/:kind.csv',auth,(req,res)=>{
   if(typeof req.body.csv!=='string'||req.body.csv.length>900000)return fail(res,400,'Неверный CSV');
   let rows;try{rows=parseCsv(req.body.csv)}catch(error){return fail(res,400,error.message)}
   if(rows.length<2)return fail(res,400,'CSV должен содержать заголовок и хотя бы одну строку');
+  if(rows.length-1>importMaxRows())return fail(res,413,`За один раз можно импортировать не больше ${importMaxRows()} строк. Разделите файл на части`);
   const header=rows[0].map(column=>column.trim().toLowerCase());
   const index=Object.fromEntries(Object.entries(config.aliases).map(([key,names])=>[key,header.findIndex(column=>names.includes(column))]));
   if(index.name<0)return fail(res,400,'В CSV нужна колонка name или название записи');
@@ -761,11 +928,50 @@ app.post('/api/import/:kind.csv',auth,(req,res)=>{
     }else{const created=addCompanyFull.run(name,owner,col('website').slice(0,255),col('phone').slice(0,80),email,col('notes').slice(0,5000),col('tags').slice(0,1000)).lastInsertRowid;entityEvent('company',created,req.user.id,'Компания импортирована из CSV')}
     count++;
   }return count})();
+  audit(req,`import.${req.params.kind}`,{details:`Импортировано: ${imported}`});
   res.json({imported,skipped:rows.length-1-imported});
 });
-registerIntegrations(app,db,{auth,admin,event,runStageAutomation});
+// Permanent deletion from the trash (admin only): removes the record, its notes, history,
+// custom values and attachment files, so a client's personal data can actually be erased.
+function registerPurge(){
+  const removeFiles=names=>{for(const name of names){try{unlinkSync(resolve(uploadDir,name))}catch(error){if(error.code!=='ENOENT')console.error('Purge file:',error)}}};
+  const cleanup=(type,id)=>{
+    const files=db.prepare('SELECT stored_name FROM attachments WHERE entity_type=? AND entity_id=?').all(type,id).map(row=>row.stored_name);
+    db.prepare('DELETE FROM attachments WHERE entity_type=? AND entity_id=?').run(type,id);
+    db.prepare('DELETE FROM custom_field_values WHERE entity_id=? AND field_id IN (SELECT id FROM custom_fields WHERE entity_type=?)').run(id,type);
+    if(type!=='deal'){db.prepare('DELETE FROM entity_notes WHERE entity_type=? AND entity_id=?').run(type,id);db.prepare('DELETE FROM entity_activity WHERE entity_type=? AND entity_id=?').run(type,id)}
+    return files;
+  };
+  const kinds={
+    deals:{table:'deals',purge:id=>{const files=cleanup('deal',id);db.prepare('DELETE FROM inbox_leads WHERE deal_id=?').run(id);db.prepare('DELETE FROM deals WHERE id=?').run(id);return files}},
+    contacts:{table:'contacts',purge:id=>{const files=cleanup('contact',id);db.prepare('DELETE FROM contacts WHERE id=?').run(id);return files}},
+    companies:{table:'companies',purge:id=>{const files=cleanup('company',id);db.prepare('DELETE FROM companies WHERE id=?').run(id);return files}},
+    tasks:{table:'tasks',purge:id=>{db.prepare('DELETE FROM tasks WHERE id=?').run(id);return []}}
+  };
+  const nameColumn=kind=>kind==='tasks'?'title':'name';
+  const purgeRows=(req,kind,rows)=>{
+    const config=kinds[kind];
+    const files=db.transaction(()=>rows.flatMap(row=>config.purge(row.id)))();
+    removeFiles(files);
+    for(const row of rows)audit(req,'record.purged',{target:`${kind}:${row.id}`,details:row.name});
+    return rows.length;
+  };
+  app.delete('/api/trash/:kind/:id',auth,admin,(req,res)=>{
+    const kind=req.params.kind,config=kinds[kind];if(!config)return fail(res,404,'Неизвестный тип записи');
+    const row=db.prepare(`SELECT id,${nameColumn(kind)} name FROM ${config.table} WHERE id=? AND deleted_at IS NOT NULL`).get(int(req.params.id));
+    if(!row)return fail(res,404,'Запись не найдена в корзине');
+    res.json({ok:true,purged:purgeRows(req,kind,[row])});
+  });
+  app.delete('/api/trash/:kind',auth,admin,(req,res)=>{
+    const kind=req.params.kind,config=kinds[kind];if(!config)return fail(res,404,'Неизвестный тип записи');
+    const rows=db.prepare(`SELECT id,${nameColumn(kind)} name FROM ${config.table} WHERE deleted_at IS NOT NULL ORDER BY id LIMIT 5000`).all();
+    res.json({ok:true,purged:purgeRows(req,kind,rows)});
+  });
+}
+registerIntegrations(app,db,{auth,admin,event,runStageAutomation,audit});
+registerPurge();
 app.use(express.static(resolve(root,'dist')));
-app.get('/{*path}',(req,res) => { if (req.path.startsWith('/api/')) return fail(res,404,'Маршрут не найден'); res.sendFile(resolve(root,'dist/index.html')); });
+app.get('/{*path}',(req,res) => { if (isApiPath(req.path)) return fail(res,404,'Маршрут не найден'); res.sendFile(resolve(root,'dist/index.html')); });
 app.use((err,_req,res,_next) => { console.error(err); fail(res,500,'Ошибка сервера'); });
 if (process.env.NODE_ENV !== 'test') { const port=Number(process.env.PORT)||3001,host=process.env.HOST||'127.0.0.1'; app.listen(port,host,()=>console.log(`OpenCRM: http://${host}:${port}`)); }
 export { app, db };
