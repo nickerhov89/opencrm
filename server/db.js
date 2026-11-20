@@ -8,7 +8,7 @@ import pg from 'pg';
 // The interface stays close to a prepared-statement API: db.prepare(sql).get/all/run(...params),
 // all of them async. Placeholders are written as "?" and translated to $1..$n.
 
-const tablesWithId = new Set(['users','user_groups','deal_saved_filters','pipelines','stages','companies','contacts','deals','inbox_leads','lead_forms','api_keys','webhook_endpoints','webhook_events','webhook_deliveries','tasks','notes','deal_communications','entity_notes','entity_activity','activity','custom_fields','attachments','audit_log']);
+const tablesWithId = new Set(['users','user_groups','deal_saved_filters','pipelines','stages','companies','contacts','deals','inbox_leads','lead_forms','api_keys','webhook_endpoints','webhook_events','webhook_deliveries','tasks','notes','deal_communications','entity_notes','entity_activity','activity','custom_fields','attachments','audit_log','deal_stage_changes']);
 
 // Rewrites the few SQLite-isms that are still convenient to write into Postgres syntax.
 export function translate(sql) {
@@ -63,7 +63,10 @@ const slowQueryMs = Number(process.env.OPENCRM_SLOW_SQL_MS) || 0;
 const parseBigint = value => value === null ? null : Number(value);
 
 class Database {
-  constructor(driver) { this.driver = driver; this.scope = new AsyncLocalStorage(); this.depth = 0; }
+  constructor(driver) { this.driver = driver; this.scope = new AsyncLocalStorage(); this.actorScope = new AsyncLocalStorage(); this.depth = 0; }
+  // Who is acting in this request: 'user:<id>' or 'api_key:<id>'. Transactions started inside
+  // runAs() expose it to triggers as current_setting('opencrm.actor') (stage history, webhooks).
+  runAs(actor, fn) { return this.actorScope.run(actor, fn); }
   connection() { return this.scope.getStore()?.client || this.driver; }
   async query(sql, params = []) {
     const started = Date.now();
@@ -84,7 +87,11 @@ class Database {
         try { const result = await fn(...args); await current.client.query(`RELEASE SAVEPOINT ${name}`); return result; }
         catch (error) { await current.client.query(`ROLLBACK TO SAVEPOINT ${name}`); throw error; }
       }
-      return this.driver.transaction(client => this.scope.run({ client, savepoints: 0 }, () => fn(...args)));
+      const actor = this.actorScope.getStore();
+      return this.driver.transaction(async client => {
+        if (actor) await client.query("SELECT set_config('opencrm.actor', $1, true)", [actor]);
+        return this.scope.run({ client, savepoints: 0 }, () => fn(...args));
+      });
     };
   }
   close() { return this.driver.close(); }
@@ -238,7 +245,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at,id);
 DO $$
 DECLARE t text;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['contacts','companies','tasks'] LOOP
+  FOREACH t IN ARRAY ARRAY['contacts','companies','tasks','notes','entity_notes'] LOOP
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = t AND column_name = 'updated_at') THEN
       EXECUTE format('ALTER TABLE %I ADD COLUMN updated_at TEXT', t);
       EXECUTE format('UPDATE %I SET updated_at = created_at', t);
@@ -246,11 +253,104 @@ BEGIN
     END IF;
   END LOOP;
 END $$;
+-- updated_at moves when the row really changes, unless the statement sets updated_at itself.
 CREATE OR REPLACE FUNCTION trg_touch_updated_at() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  NEW.updated_at := now_text();
+  IF NEW.updated_at IS NOT DISTINCT FROM OLD.updated_at AND (to_jsonb(OLD) - 'updated_at') IS DISTINCT FROM (to_jsonb(NEW) - 'updated_at') THEN
+    NEW.updated_at := now_text();
+  END IF;
   RETURN NEW;
 END $$;
+DROP TRIGGER IF EXISTS trg_deals_touch ON deals;
+CREATE TRIGGER trg_deals_touch BEFORE UPDATE ON deals FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
+DROP TRIGGER IF EXISTS trg_notes_touch ON notes;
+CREATE TRIGGER trg_notes_touch BEFORE UPDATE ON notes FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
+DROP TRIGGER IF EXISTS trg_entity_notes_touch ON entity_notes;
+CREATE TRIGGER trg_entity_notes_touch BEFORE UPDATE ON entity_notes FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
+CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at,id);
+CREATE INDEX IF NOT EXISTS idx_entity_notes_updated ON entity_notes(updated_at,id);
+CREATE INDEX IF NOT EXISTS idx_deals_deleted ON deals(deleted_at) WHERE deleted_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_contacts_deleted ON contacts(deleted_at) WHERE deleted_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_companies_deleted ON companies(deleted_at) WHERE deleted_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_tasks_deleted ON tasks(deleted_at) WHERE deleted_at IS NOT NULL;
+
+-- Who acts in the current transaction: set by the app as opencrm.actor = 'user:<id>' or 'api_key:<id>'.
+CREATE OR REPLACE FUNCTION current_actor_id(kind text) RETURNS bigint LANGUAGE sql STABLE AS $$
+  SELECT CASE WHEN split_part(COALESCE(current_setting('opencrm.actor', true), ''), ':', 1) = kind
+    THEN NULLIF(split_part(current_setting('opencrm.actor', true), ':', 2), '')::bigint END
+$$;
+
+-- Deals: closed_at is set when a deal enters a won or lost stage and cleared when it returns to a
+-- working stage. An explicit closed_at in the same statement (data import) is kept.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'deals' AND column_name = 'closed_at') THEN
+    ALTER TABLE deals ADD COLUMN closed_at TEXT;
+    UPDATE deals d SET closed_at = d.updated_at FROM stages s WHERE s.id = d.stage_id AND s.kind <> 'active';
+  END IF;
+END $$;
+CREATE OR REPLACE FUNCTION trg_deal_closed_at() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE closed boolean;
+BEGIN
+  SELECT kind <> 'active' INTO closed FROM stages WHERE id = NEW.stage_id;
+  IF TG_OP = 'INSERT' THEN
+    NEW.closed_at := CASE WHEN closed THEN COALESCE(NEW.closed_at, now_text()) END;
+  ELSIF NEW.stage_id IS DISTINCT FROM OLD.stage_id AND NEW.closed_at IS NOT DISTINCT FROM OLD.closed_at THEN
+    NEW.closed_at := CASE WHEN closed THEN now_text() END;
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_deal_closed_at ON deals;
+CREATE TRIGGER trg_deal_closed_at BEFORE INSERT OR UPDATE OF stage_id ON deals FOR EACH ROW EXECUTE FUNCTION trg_deal_closed_at();
+CREATE INDEX IF NOT EXISTS idx_deals_closed ON deals(closed_at) WHERE closed_at IS NOT NULL;
+
+-- Stage history: one row per deal creation (from_* empty) and per stage change.
+DO $$
+BEGIN
+  IF to_regclass('deal_stage_changes') IS NULL THEN
+    CREATE TABLE deal_stage_changes (id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, deal_id BIGINT NOT NULL REFERENCES deals(id) ON DELETE CASCADE, from_stage_id BIGINT, from_pipeline_id BIGINT, to_stage_id BIGINT NOT NULL, to_pipeline_id BIGINT, user_id BIGINT, api_key_id BIGINT, changed_at TEXT NOT NULL DEFAULT now_text());
+    INSERT INTO deal_stage_changes (deal_id,to_stage_id,to_pipeline_id,changed_at) SELECT d.id, d.stage_id, s.pipeline_id, d.created_at FROM deals d JOIN stages s ON s.id = d.stage_id ORDER BY d.id;
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_deal_stage_changes_time ON deal_stage_changes(changed_at,id);
+CREATE INDEX IF NOT EXISTS idx_deal_stage_changes_deal ON deal_stage_changes(deal_id,id);
+CREATE OR REPLACE FUNCTION trg_deal_stage_history() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    INSERT INTO deal_stage_changes (deal_id,to_stage_id,to_pipeline_id,user_id,api_key_id)
+    VALUES (NEW.id, NEW.stage_id, (SELECT pipeline_id FROM stages WHERE id = NEW.stage_id), current_actor_id('user'), current_actor_id('api_key'));
+  ELSIF NEW.stage_id IS DISTINCT FROM OLD.stage_id THEN
+    INSERT INTO deal_stage_changes (deal_id,from_stage_id,from_pipeline_id,to_stage_id,to_pipeline_id,user_id,api_key_id)
+    VALUES (NEW.id, OLD.stage_id, (SELECT pipeline_id FROM stages WHERE id = OLD.stage_id), NEW.stage_id, (SELECT pipeline_id FROM stages WHERE id = NEW.stage_id), current_actor_id('user'), current_actor_id('api_key'));
+  END IF;
+  RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS trg_deal_stage_history ON deals;
+CREATE TRIGGER trg_deal_stage_history AFTER INSERT OR UPDATE OF stage_id ON deals FOR EACH ROW EXECUTE FUNCTION trg_deal_stage_history();
+
+-- After rows were inserted with explicit IDs (data import), move every ID sequence past the largest
+-- ID so that new records do not collide. Sequences that are already ahead are left alone.
+CREATE OR REPLACE FUNCTION sync_id_sequences() RETURNS integer LANGUAGE plpgsql AS $$
+DECLARE r record; seq text; top bigint; cur bigint; called boolean; fixed integer := 0;
+BEGIN
+  FOR r IN SELECT c.table_name FROM information_schema.columns c WHERE c.table_schema = current_schema() AND c.column_name = 'id' AND c.is_identity = 'YES' LOOP
+    seq := pg_get_serial_sequence(quote_ident(r.table_name), 'id');
+    EXECUTE format('SELECT max(id) FROM %I', r.table_name) INTO top;
+    EXECUTE format('SELECT last_value, is_called FROM %s', seq) INTO cur, called;
+    IF top IS NOT NULL AND (top > cur OR (top = cur AND NOT called)) THEN
+      PERFORM setval(seq, top, true);
+      fixed := fixed + 1;
+    END IF;
+  END LOOP;
+  RETURN fixed;
+END $$;
+
+-- Contacts: Telegram username, matched without @, t.me/ and letter case.
+ALTER TABLE contacts ADD COLUMN IF NOT EXISTS telegram TEXT NOT NULL DEFAULT '';
+CREATE OR REPLACE FUNCTION normalize_telegram(value text) RETURNS text LANGUAGE sql IMMUTABLE AS $$
+  SELECT lower(regexp_replace(btrim(COALESCE(value, '')), '^(https?://)?(www[.])?((t|telegram)[.]me/)?@?', ''))
+$$;
+CREATE INDEX IF NOT EXISTS idx_contacts_telegram ON contacts(normalize_telegram(telegram)) WHERE telegram <> '';
 DROP TRIGGER IF EXISTS trg_contacts_touch ON contacts;
 CREATE TRIGGER trg_contacts_touch BEFORE UPDATE ON contacts FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 DROP TRIGGER IF EXISTS trg_companies_touch ON companies;
@@ -287,7 +387,7 @@ BEGIN
   END IF;
 END $$;
 CREATE OR REPLACE FUNCTION webhook_deal_payload(d deals) RETURNS jsonb LANGUAGE sql STABLE AS $$
-  SELECT jsonb_build_object('id',d.id,'pipeline_id',(SELECT pipeline_id FROM stages WHERE id=d.stage_id),'stage_id',d.stage_id,'name',d.name,'amount',d.amount,'owner_id',d.owner_id,'contact_id',d.contact_id,'company_id',d.company_id,'source',d.source,'tags',d.tags,'loss_reason',d.loss_reason,'created_at',d.created_at,'updated_at',d.updated_at,'deleted_at',d.deleted_at)
+  SELECT jsonb_build_object('id',d.id,'pipeline_id',(SELECT pipeline_id FROM stages WHERE id=d.stage_id),'stage_id',d.stage_id,'name',d.name,'amount',d.amount,'owner_id',d.owner_id,'contact_id',d.contact_id,'company_id',d.company_id,'source',d.source,'tags',d.tags,'loss_reason',d.loss_reason,'created_at',d.created_at,'updated_at',d.updated_at,'closed_at',d.closed_at,'deleted_at',d.deleted_at,'changed_by',jsonb_build_object('user_id',current_actor_id('user'),'api_key_id',current_actor_id('api_key')))
 $$;
 CREATE OR REPLACE FUNCTION trg_webhook_lead_created() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -384,6 +484,7 @@ export async function createDb({ url = process.env.DATABASE_URL, dataDir = proce
   await db.transaction(async () => {
     await db.query('SELECT pg_advisory_xact_lock(4242001)');
     await db.exec(schema);
+    await db.query('SELECT sync_id_sequences()');
     if (!await db.prepare('SELECT id FROM pipelines LIMIT 1').get()) {
       const pipeline = await db.prepare('INSERT INTO pipelines (name) VALUES (?)').run('Воронка — новые лиды');
       for (const [index, [name, color, kind]] of defaultStages.entries()) {

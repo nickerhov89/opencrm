@@ -31,7 +31,7 @@ COPY --from=build --chown=node:node /app/package.json ./package.json
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/server ./server
-COPY --from=build --chown=node:node /app/src/deal-card-layout.js ./src/deal-card-layout.js
+COPY --from=build --chown=node:node /app/src/deal-card-layout.js /app/src/task-types.js ./src/
 COPY --chown=node:node scripts ./scripts
 COPY --chown=node:node tests ./tests
 RUN mkdir -p /app/data/uploads /app/backups && chown -R node:node /app/data /app/backups

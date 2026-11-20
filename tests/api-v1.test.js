@@ -35,7 +35,7 @@ test('API v1: deals, contacts, companies, tasks, notes, fields, pipelines and st
   try {
     await call('/setup', {method: 'POST', body: {name: 'Admin', email: 'admin@example.test', password: 'test-password-123'}});
     const all = ['deals:read', 'deals:write', 'contacts:read', 'contacts:write', 'companies:read', 'companies:write', 'tasks:read', 'tasks:write', 'users:read', 'pipelines:write', 'fields:write'];
-    const key = (await call('/integrations/keys', {method: 'POST', body: {name: 'Portal', scopes: all}, status: 201})).token;
+    const portalKey = await call('/integrations/keys', {method: 'POST', body: {name: 'Portal', scopes: all}, status: 201}), key = portalKey.token;
     const readOnly = (await call('/integrations/keys', {method: 'POST', body: {name: 'Reader', scopes: ['deals:read']}, status: 201})).token;
     await call('/integrations/keys', {method: 'POST', body: {name: 'Bad', scopes: ['everything']}, status: 400});
     await call('/integrations/webhooks', {method: 'POST', body: {name: 'Portal hook', url: `http://127.0.0.1:${receiver.address().port}/hook`, events: ['deal.updated', 'deal.deleted', 'contact.created', 'contact.updated', 'company.created', 'task.created', 'task.completed', 'note.created']}, status: 201});
@@ -75,7 +75,7 @@ test('API v1: deals, contacts, companies, tasks, notes, fields, pipelines and st
     // Companies and contacts
     const company = await call('/v1/companies', {key, method: 'POST', body: {name: 'Example LLC', phone: '+7 (900) 111-22-33', tags: ['vip', 'portal', 'VIP'], owner_id: owner}, status: 201});
     assert.equal(company.tags, 'vip, portal');
-    const contactBody = {name: 'Synthetic Person', company_id: company.id, phone: '+7 900 555-44-33', email: 'Person@Example.test', custom_fields: {[segment.id]: 'B'}};
+    const contactBody = {name: 'Synthetic Person', company_id: company.id, phone: '+7 900 555-44-33', email: 'Person@Example.test', telegram: '@Synthetic_TG', custom_fields: {[segment.id]: 'B'}};
     const contact = await call('/v1/contacts', {key, method: 'POST', body: contactBody, status: 201, headers: {'Idempotency-Key': 'contact-1'}});
     assert.equal(contact.custom_fields[0].value, 'B');
     assert.equal((await call('/v1/contacts', {key, method: 'POST', body: contactBody, headers: {'Idempotency-Key': 'contact-1'}})).id, contact.id);
@@ -175,15 +175,54 @@ test('API v1: deals, contacts, companies, tasks, notes, fields, pipelines and st
     await call(`/pipelines/${pipeline.id}/transitions`, {method: 'PUT', body: {mode: 'any', lock_deals: false}});
     await call(`/v1/deals/${deal.id}`, {key, method: 'PATCH', body: {pipeline_id: defaultPipeline.id}});
 
+    // Stage history with the actor, closed_at
+    const defaultWon = defaultPipeline.stages.find(stage => stage.kind === 'won'), defaultFirst = defaultPipeline.stages[0];
+    const closed = await call(`/v1/deals/${deal.id}`, {key, method: 'PATCH', body: {stage_id: defaultWon.id}});
+    assert.match(closed.closed_at, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    assert.equal((await call(`/v1/deals?closed_since=2000-01-01&pipeline_id=${defaultPipeline.id}`, {key})).items[0].id, deal.id);
+    assert.equal((await call(`/v1/deals/${deal.id}`, {key, method: 'PATCH', body: {stage_id: defaultFirst.id}})).closed_at, null);
+    const changes = (await call(`/v1/stage-changes?deal_id=${deal.id}&limit=250`, {key: readOnly})).items;
+    assert.equal(changes[0].from_stage_id, null);
+    assert.equal(changes[0].to_stage_id, newStage.id);
+    assert.deepEqual(changes[0].changed_by, {type: 'api_key', id: portalKey.id});
+    const byAdmin = changes.find(change => change.to_stage_id === qualified.id && change.user_id);
+    assert.deepEqual(byAdmin.changed_by.type, 'user');
+    assert.deepEqual(changes.slice(-2).map(change => [change.from_stage_id, change.to_stage_id]), [[defaultFirst.id, defaultWon.id], [defaultWon.id, defaultFirst.id]]);
+    assert.equal(new Set(changes.map(change => change.id)).size, changes.length);
+    assert.ok((await call(`/v1/stage-changes?pipeline_id=${pipeline.id}`, {key})).items.length >= 5);
+
+    // Notes of all deals, Telegram and custom field lookups, task types
+    const allNotes = await call('/v1/notes?entity_type=deal', {key});
+    assert.equal(allNotes.items[0].entity_id, deal.id);
+    assert.ok(allNotes.items[0].updated_at);
+    assert.equal((await call('/v1/notes?entity_type=contact', {key})).items[0].id, contactNote.id);
+    await call('/v1/notes?entity_type=contact', {key: readOnly, status: 403});
+    await call('/v1/notes', {key, status: 400});
+    assert.equal((await call('/v1/contacts?telegram=https%3A%2F%2Ft.me%2Fsynthetic_tg', {key})).items[0].id, contact.id);
+    assert.equal((await call('/v1/contacts?telegram=other', {key})).items.length, 0);
+    assert.equal((await call(`/v1/contacts?custom_field%5B${segment.id}%5D=b`, {key})).items[0].id, contact.id);
+    assert.equal((await call(`/v1/deals?custom_field%5B${budgetField.id}%5D=42&include_deleted=1`, {key})).items[0].id, deal.id);
+    await call(`/v1/contacts?custom_field%5B${budgetField.id}%5D=42`, {key, status: 400});
+    assert.ok((await call('/v1/task-types', {key})).items.includes('Встреча'));
+
     // Deleting moves records to the trash and fires webhooks
     await call(`/v1/deals/${deal.id}`, {key, method: 'DELETE'});
     await call(`/v1/deals/${deal.id}`, {key, status: 404});
     await call(`/v1/contacts/${second.id}`, {key, method: 'DELETE'});
     await call(`/v1/contacts/${second.id}`, {key, status: 404});
+    assert.equal((await call(`/v1/deals?pipeline_id=${defaultPipeline.id}`, {key})).items.some(item => item.id === deal.id), false);
+    const trashed = (await call(`/v1/deals?deleted_since=2000-01-01`, {key})).items;
+    assert.deepEqual(trashed.map(item => item.id), [deal.id]);
+    assert.ok(trashed[0].deleted_at);
+    assert.ok((await call('/v1/deals?include_deleted=1', {key})).items.some(item => item.id === deal.id));
+    assert.ok((await call('/v1/contacts?deleted_since=2000-01-01', {key})).items.some(item => item.id === second.id));
+    assert.ok((await call('/v1/tasks?deleted_since=2000-01-01', {key})).items.some(item => item.id === companyTask.id));
+    assert.equal((await call(`/v1/tasks?deal_id=${deal.id}`, {key})).items.length, 0, 'tasks of a trashed deal are hidden');
     while (await processWebhookQueue(db, 100));
     const types = new Set(received.map(item => item.type));
     for (const type of ['deal.updated', 'deal.deleted', 'contact.created', 'contact.updated', 'company.created', 'task.created', 'task.completed', 'note.created']) assert.ok(types.has(type), `webhook ${type}`);
     assert.equal(received.find(item => item.type === 'deal.deleted').data.id, deal.id);
+    assert.deepEqual(received.find(item => item.type === 'deal.deleted').data.changed_by, {user_id: null, api_key_id: portalKey.id});
     assert.equal((await db.prepare("SELECT COUNT(*) n FROM webhook_events WHERE event_type='contact.deleted'").get()).n, 0, 'events nobody subscribed to are not stored');
   } finally {
     await Promise.all([new Promise(resolve => server.close(resolve)), new Promise(resolve => receiver.close(resolve))]);
