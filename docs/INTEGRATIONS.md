@@ -1,6 +1,6 @@
 # OpenCRM API and webhooks
 
-OpenCRM 0.2 adds a small, versioned HTTP API and signed outgoing webhooks. They are intended for server-to-server connections such as websites, n8n, Make, and custom services. The current UI for configuring them is **Settings → Интеграции** and is available to administrators only.
+OpenCRM has a versioned HTTP API (`/api/v1`) and signed outgoing webhooks for server-to-server connections: a company portal, a website, n8n, Make or a custom service. Through the API an external system can do what an employee does in the interface: create and update deals, contacts, companies and tasks, add notes, read pipelines, set up stages, stage transition rules and custom fields. Integrations are configured in **Settings → Интеграции**, which is available to administrators only.
 
 ![Integration settings in the Russian UI](integrations-preview.png)
 
@@ -11,12 +11,162 @@ Create a named key in Settings → Интеграции and select only the scop
 | Scope | Operations |
 |---|---|
 | `leads:write` | Create an inbox lead with `POST /api/v1/leads` |
-| `deals:read` | List pipelines and stages; list and read deals |
-| `deals:write` | Change the stage of a deal |
+| `deals:read` | Read pipelines, stages, transition rules, deals, deal notes, calls and history; read deal custom fields |
+| `deals:write` | Create, update, move and delete deals; link contacts; add notes and calls to deals |
+| `contacts:read` / `contacts:write` | Read / create, update, delete contacts and their notes |
+| `companies:read` / `companies:write` | Read / create, update, delete companies and their notes |
+| `tasks:read` / `tasks:write` | Read / create, update, complete and delete tasks |
+| `users:read` | List employees (ID, name, email, role, active) to assign owners |
+| `pipelines:write` | Create and rename pipelines and stages, reorder stages, set stage transition rules |
+| `fields:write` | Create and change custom fields (and read all of them) |
 
-All JSON endpoints use `/api/v1` and return `{ "error": "..." }` on failure. An invalid or revoked key gets HTTP 401; a key without the required scope gets 403. API keys are instance-wide service credentials, so grant `deals:read` only to systems allowed to read all deals. The session permissions of individual CRM users do not apply to these keys.
+API keys are instance-wide service credentials: the visibility settings of individual employees ("only own deals") do not apply to them, so give a key only the scopes the connected system needs. Stage transition rules of pipelines do apply to API keys.
 
-### Create a lead
+`GET /api/v1/me` works with any valid key and returns the account name, the key name and its scopes — use it to check a key.
+
+## Conventions
+
+- Base URL: `https://<your-crm>/api/v1`. Requests and responses are JSON (`Content-Type: application/json`).
+- Errors: `{ "error": "..." }` with HTTP 400 (invalid data), 401 (no or revoked key), 403 (scope missing or a transition rule forbids the move), 404 (not found), 409 (conflict).
+- IDs are integers. Timestamps such as `created_at` and `updated_at` are UTC strings `YYYY-MM-DD HH:MM:SS`. Task `due_at` is ISO 8601 (`2026-12-01T09:00:00.000Z`).
+- `PATCH` changes only the fields you send. Send `null` to clear an optional link such as `company_id` or `owner_id`.
+- `DELETE` moves a deal, contact, company or task to the trash, where an administrator can restore it in the interface.
+- History entries made through the API read "через API («key name»)" and have no author.
+- `tags` accepts a comma-separated string or a list of strings and is returned as a string `"vip, portal"`.
+- **Lists** use ascending ID cursor pagination: `?limit=50&after=0`. `limit` is 1–250 (default 50). Pass the returned `next_after` as `after` for the next page; `null` means there are no more rows. Response: `{ "items": [...], "next_after": 123 }`.
+- **Sync**: every list takes `updated_since` and `created_since` (ISO 8601 or `YYYY-MM-DD HH:MM:SS`, UTC). Store the time of your last sync and request `updated_since=<that time>` to get changed records; use webhooks for deletions.
+- **Idempotency**: `POST` for deals, contacts, companies, tasks and leads accepts an `Idempotency-Key` header (letters, digits, `. _ ~ -`, up to 128 characters). Repeating the same request with the same key returns HTTP 200 and the original record instead of creating a duplicate; the same key with different data returns 409. Keys are kept for 30 days per API key.
+
+## Custom fields
+
+Deals, contacts and companies can have custom fields of types `text`, `number`, `date` (`YYYY-MM-DD`), `url` and `select`.
+
+```text
+GET   /api/v1/custom-fields?entity_type=deal       # deal | contact | company; without it — every type the key can read
+POST  /api/v1/custom-fields                        # fields:write
+PATCH /api/v1/custom-fields/:id                    # fields:write: name, options (select only)
+```
+
+```json
+POST /api/v1/custom-fields
+{"entity_type": "deal", "name": "Portal ID", "field_type": "text"}
+{"entity_type": "contact", "name": "Segment", "field_type": "select", "options": ["A", "B"]}
+```
+
+A select option that is in use cannot be removed. Records return non-empty values as `"custom_fields": [{"id": 3, "name": "Portal ID", "field_type": "text", "value": "42"}]`. To write values send `"custom_fields": {"3": "42", "5": "B"}` (or `[{"id": 3, "value": "42"}]`) in `POST`/`PATCH`; an empty string or `null` clears the value. Values are validated by field type.
+
+## Pipelines, stages and transition rules
+
+```text
+GET   /api/v1/pipelines                          # deals:read or pipelines:write
+GET   /api/v1/pipelines/:id
+POST  /api/v1/pipelines                          # pipelines:write
+PATCH /api/v1/pipelines/:id                      # name, sort_order
+POST  /api/v1/pipelines/:id/stages               # name, color, position (0 = first working stage)
+PATCH /api/v1/stages/:id                         # name, color
+PUT   /api/v1/pipelines/:id/stage-order          # {"ids": [all working stage IDs in the new order]}
+GET   /api/v1/pipelines/:id/transitions
+PUT   /api/v1/pipelines/:id/transitions          # pipelines:write
+```
+
+A pipeline response contains `stages` (`id`, `name`, `kind`: `active` | `won` | `lost`, `color`, `sort_order`), `transition_mode`, `lock_deals` and `transitions`.
+
+```json
+POST /api/v1/pipelines
+{"name": "Portal sales", "stages": [{"name": "New"}, {"name": "Qualified", "color": "#bcd3f6"}, {"name": "Won", "kind": "won"}]}
+```
+
+Every pipeline has working stages plus exactly one won and one lost stage; missing final stages are added with default names. Stages cannot be deleted through the API.
+
+**Transition rules** decide where a deal may be moved:
+
+- `mode: "any"` (default) — between any stages of the pipeline;
+- `mode: "restricted"` — only along the listed pairs `from_stage_id → to_stage_id` inside the pipeline;
+- `lock_deals: true` — deals of this pipeline cannot be moved to another pipeline.
+
+```json
+PUT /api/v1/pipelines/7/transitions
+{"mode": "restricted", "lock_deals": true, "transitions": {"31": [32], "32": [33, 36], "33": [35, 36]}}
+```
+
+`transitions` is either a map `{"from stage ID": [to stage IDs]}` or a list `[{"from_stage_id": 31, "to_stage_id": 32}]`; sending it replaces all pairs of the pipeline. Omit it to change only `mode` or `lock_deals`. A new stage gets no pairs automatically. The same rules are edited in the interface under the pipeline settings → **Правила переходов**. They apply to employees and to every API key; administrators are exempt in the interface. A forbidden move returns HTTP 403 with the reason. `GET /api/v1/deals/:id/allowed-stages` returns the stage IDs the deal may move to now.
+
+## Deals
+
+```text
+GET    /api/v1/deals                 # filters: pipeline_id, stage_id, stage_kind, owner_id, contact_id, company_id, q, updated_since, created_since
+GET    /api/v1/deals/:id
+POST   /api/v1/deals                 # deals:write
+PATCH  /api/v1/deals/:id
+PATCH  /api/v1/deals/:id/stage       # {"stage_id": 8, "loss_reason": "..."}: within the same pipeline, loss_reason required for a lost stage
+DELETE /api/v1/deals/:id
+GET    /api/v1/deals/:id/allowed-stages
+POST   /api/v1/deals/:id/contacts             # {"contact_id": 5, "main": true}
+DELETE /api/v1/deals/:id/contacts/:contactId
+GET    /api/v1/deals/:id/notes
+POST   /api/v1/deals/:id/notes               # {"body": "...", "pinned": false, "user_id": 2}
+PATCH  /api/v1/deals/:id/notes/:noteId       # {"pinned": true}
+GET    /api/v1/deals/:id/communications
+POST   /api/v1/deals/:id/communications      # {"kind": "call|email|message", "direction": "incoming|outgoing", "subject": "(email only)", "body": "...", "user_id": 2}
+GET    /api/v1/deals/:id/activity            # deal history, newest first
+```
+
+```bash
+curl -X POST 'https://crm.example.com/api/v1/deals' \
+  -H 'Authorization: Bearer YOUR_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: portal-order-1001' \
+  --data '{"name":"Order 1001","pipeline_id":1,"amount":150000,"owner_id":2,"contact_ids":[15],"company_id":4,"source":"Portal","tags":["portal"],"custom_fields":{"3":"1001"}}'
+```
+
+Fields: `name` (required on create), `stage_id` or `pipeline_id` (then the deal goes to the first working stage), `amount` (integer ≥ 0), `owner_id`, `contact_ids` (the first is the main contact; on `PATCH` the list replaces all links, `[]` removes them), `company_id`, `source`, `tags`, `description`, `loss_reason` (for a lost stage), `custom_fields`. A deal response contains `id`, `name`, `stage_id`, `pipeline_id`, `stage_kind`, `owner_id`, `contact_id` (main), `contact_ids`, `company_id`, `amount`, `source`, `tags`, `description`, `loss_reason`, `custom_fields`, `created_at`, `updated_at`. Contact phones and emails are not part of a deal: read them with `contacts:read`.
+
+Changing `stage_id` (or `pipeline_id` to move to another pipeline) checks the transition rules, writes history, runs the stage task automation and emits `deal.stage_changed`. Notes and calls may name the employee in `user_id` to show them as the author.
+
+## Contacts and companies
+
+```text
+GET    /api/v1/contacts              # filters: q, email, phone, company_id, owner_id, tag, updated_since, created_since
+GET    /api/v1/contacts/:id
+POST   /api/v1/contacts              # contacts:write
+PATCH  /api/v1/contacts/:id
+DELETE /api/v1/contacts/:id
+GET    /api/v1/contacts/:id/notes
+POST   /api/v1/contacts/:id/notes    # {"body": "...", "user_id": 2}
+
+GET    /api/v1/companies             # filters: q, email, phone, owner_id, tag, updated_since, created_since
+...                                  # the same routes as contacts, scope companies:*
+```
+
+Contact fields: `name` (required), `phone`, `email`, `position`, `company_id`, `owner_id`, `notes`, `tags`, `custom_fields`. Company fields: `name` (required), `phone`, `email`, `website`, `address`, `owner_id`, `notes`, `tags`, `custom_fields`.
+
+`q` searches the name, email and phone. `email` matches exactly, ignoring case. `phone` compares digits only (the last ten), so `8 900 555-44-33` finds `+7 (900) 555-44-33`. To find or create a contact from a portal, search by `phone` or `email` first and create one only if nothing is found.
+
+## Tasks
+
+```text
+GET    /api/v1/tasks                 # filters: deal_id, contact_id, company_id, owner_id, state=open|done|all, due_from, due_to, updated_since, created_since
+GET    /api/v1/tasks/:id
+POST   /api/v1/tasks                 # tasks:write
+PATCH  /api/v1/tasks/:id
+DELETE /api/v1/tasks/:id
+```
+
+```json
+POST /api/v1/tasks
+{"title": "Call the client", "task_type": "Звонок", "deal_id": 123, "due_at": "2026-12-01T09:00:00Z", "duration_minutes": 30}
+
+PATCH /api/v1/tasks/55
+{"completed": true, "result": "Agreed on a meeting"}
+```
+
+Fields: `title` (required), `task_type` (default `Связаться`), `due_at`, `duration_minutes` (0–1440, needs `due_at`), `all_day` (needs `due_at`), `owner_id`, and links: `deal_id` and/or `contact_id`, or `company_id` alone. Without `owner_id` the task goes to the owner of the linked record; if it has none, the request returns 400. `completed: true` closes the task with an optional `result`, `completed: false` reopens it. Tasks of deals are written to the deal history. A response also contains `completed`, `completed_at`, `completion_result`, `created_at`, `updated_at`.
+
+## Employees
+
+`GET /api/v1/users` (`users:read`) returns `id`, `name`, `email`, `role`, `group_id`, `group_name`, `active`, `created_at`. Use the IDs as `owner_id` and `user_id`; disabled employees cannot be assigned.
+
+## Leads
 
 ```bash
 curl -X POST 'https://crm.example.com/api/v1/leads' \
@@ -26,30 +176,9 @@ curl -X POST 'https://crm.example.com/api/v1/leads' \
   --data '{"pipeline_id":1,"title":"Demo request","contact_name":"Example Person","email":"person@example.test","source":"Website","message":"Please call me"}'
 ```
 
-Required: a valid `pipeline_id`, a nonempty `title`, and at least one of `contact_name`, `company_name`, `phone`, or `email`. Optional: `website`, `source`, and `message`. The response is HTTP 201 with `{ "id": 123, "status": "pending", "repeated": false }`; the lead appears in **Неразобранное** for review. Repeating the same request with the same `Idempotency-Key` returns HTTP 200 and the original ID. Reusing that key with different data returns HTTP 409. Keys are unique per API key and retained for 30 days.
+A lead goes to **Неразобранное** for review instead of becoming a deal right away. Required: a valid `pipeline_id`, a nonempty `title`, and at least one of `contact_name`, `company_name`, `phone`, or `email`. Optional: `website`, `source`, and `message`. The response is HTTP 201 with `{ "id": 123, "status": "pending", "repeated": false }`.
 
 ![A fictional lead created through the API appears in the inbox](integrations-api-preview.png)
-
-### Read pipelines and deals
-
-```text
-GET /api/v1/pipelines
-GET /api/v1/deals?limit=50&after=0
-GET /api/v1/deals/123
-```
-
-Deal lists use ascending ID cursor pagination. `limit` is 1–100 (default 50). Pass the returned `next_after` value to retrieve the next page; `null` means there are no more rows. Deleted deals are excluded. Deal responses include IDs, stage and pipeline, owner, amount, source, tags, description, and timestamps; they do not include contact phone or email.
-
-### Change a deal stage
-
-```bash
-curl -X PATCH 'https://crm.example.com/api/v1/deals/123/stage' \
-  -H 'Authorization: Bearer YOUR_API_KEY' \
-  -H 'Content-Type: application/json' \
-  --data '{"stage_id":8}'
-```
-
-The new stage must belong to the deal's current pipeline. Moving to a lost stage requires `loss_reason`. A successful change writes deal history, runs that stage's task automation, and emits `deal.stage_changed`.
 
 ## Outgoing webhooks
 
@@ -59,12 +188,20 @@ Create an endpoint in Settings → Интеграции with an HTTPS URL and se
 |---|---|
 | `lead.created` | A lead is added to the inbox, including via a public form or API |
 | `deal.created` | A deal is created, including by accepting a lead or CSV import |
-| `deal.stage_changed` | A deal changes stage, including through the API or bulk actions |
+| `deal.updated` | Any field of a deal changes, including the stage, or a deal is restored from the trash |
+| `deal.stage_changed` | A deal changes stage, including through the API or bulk actions; `data` adds `previous_stage_id` and `previous_pipeline_id` |
+| `deal.deleted` | A deal is moved to the trash |
+| `contact.created` / `contact.updated` / `contact.deleted` | A contact is created, changed, or moved to the trash |
+| `company.created` / `company.updated` / `company.deleted` | The same for companies |
+| `task.created` / `task.updated` / `task.completed` / `task.deleted` | A task is created, changed, completed, or moved to the trash |
+| `note.created` | A note is added to a deal, contact or company (`data.entity_type`, `data.entity_id`) |
+
+Events fire for changes made in the interface and through the API alike. Deal events carry the deal fields (`id`, `pipeline_id`, `stage_id`, `name`, `amount`, `owner_id`, `contact_id`, `company_id`, `source`, `tags`, `loss_reason`, timestamps); contact, company and task events carry the record's columns. Events are stored only while an active endpoint subscribes to them.
 
 Each request is an HTTP POST with `Content-Type: application/json`. Example body:
 
 ```json
-{"id":42,"type":"deal.stage_changed","created_at":"2026-10-13 18:00:00","data":{"id":123,"pipeline_id":1,"previous_stage_id":2,"stage_id":3,"name":"Demo deal","amount":50000,"owner_id":1}}
+{"id":42,"type":"deal.stage_changed","created_at":"2026-10-13 18:00:00","data":{"id":123,"pipeline_id":1,"previous_pipeline_id":1,"previous_stage_id":2,"stage_id":3,"name":"Demo deal","amount":50000,"owner_id":1}}
 ```
 
 Headers:
@@ -74,7 +211,7 @@ Headers:
 - `X-OpenCRM-Timestamp`: Unix time in seconds when the request was sent.
 - `X-OpenCRM-Signature`: `sha256=` followed by hex HMAC-SHA256 of `timestamp + "." + raw_request_body`, using the endpoint secret.
 
-Check the signature with a constant-time comparison and reject stale timestamps before processing the payload. The JSON `data` can contain contact names, email, and phone for `lead.created`; send webhooks only to services you trust.
+Check the signature with a constant-time comparison and reject stale timestamps before processing the payload. The JSON `data` can contain names, email, and phone of contacts; send webhooks only to services you trust.
 
 A 2xx response marks delivery successful. Network errors and other HTTP statuses are retried up to five times; the delivery log in Settings shows attempts, response status, and errors. After the final failure, use **Повторить** in the log to requeue it. The sender never follows redirects and resolves the host to an IPv4 address before connecting. Private, loopback, link-local, and reserved IPv4 destinations are blocked by default. For a trusted internal service such as n8n, set `OPENCRM_WEBHOOK_ALLOWED_HOSTS=n8n.internal` in the server's `.env` or Compose environment; this exact hostname can then use HTTP or a private IP. For local integration tests only, `OPENCRM_ALLOW_LOCAL_WEBHOOKS=1` permits all HTTP and local addresses; do not use that broad option on a public server.
 

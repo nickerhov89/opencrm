@@ -6,11 +6,13 @@ import { fileURLToPath } from 'node:url';
 import { createDb } from './db.js';
 import { parseCsv, quoteCsvCell } from './csv.js';
 import { registerIntegrations } from './integrations.js';
+import { createStageRules, RuleError } from './stage-rules.js';
 import { permissionEntities, permissionActions, normalizePermissions, noPermissions, defaultMemberPermissions, securityHeaders, createLoginLimiter, newTotpSecret, verifyTotp, otpauthUrl } from './security.js';
 import {defaultDealCardFields,validDealCardFields} from '../src/deal-card-layout.js';
 
 const app = express();
 const db = await createDb();
+const stageRules = createStageRules(db);
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const uploadDir = resolve(process.env.UPLOAD_DIR || resolve(root,'data/uploads'));
 mkdirSync(uploadDir,{recursive:true});
@@ -480,6 +482,9 @@ app.get('/api/stages',auth,async (req,res) => { const pid=int(req.query.pipeline
 app.post('/api/stages',auth,admin,async (req,res) => { const pid=int(req.body.pipeline_id); if (!await idExists('pipelines',pid)||!required(req.body.name,120)) return fail(res,400,'Проверьте этап'); const order=(await db.prepare("SELECT COUNT(*) n FROM stages WHERE pipeline_id=? AND kind='active'").get(pid)).n;const r=await db.transaction(async ()=>{await db.prepare('UPDATE stages SET sort_order=sort_order+1 WHERE pipeline_id=? AND sort_order>=?').run(pid,order);return await db.prepare('INSERT INTO stages (pipeline_id,name,color,sort_order) VALUES (?,?,?,?)').run(pid,req.body.name.trim(),value(req.body.color,20)||'#cbd9ee',order)})(); res.status(201).json({id:r.lastInsertRowid}); });
 app.patch('/api/stages/:id',auth,admin,async (req,res) => { const id=int(req.params.id); if (!await idExists('stages',id)||!required(req.body.name,120)) return fail(res,400,'Проверьте этап'); await db.prepare('UPDATE stages SET name=?,color=? WHERE id=?').run(req.body.name.trim(),value(req.body.color,20)||'#cbd9ee',id); res.json({ok:true}); });
 app.put('/api/pipelines/:id/stage-order',auth,admin,async (req,res)=>{const pid=int(req.params.id);if(!await idExists('pipelines',pid))return fail(res,404,'Воронка не найдена');const actual=(await db.prepare("SELECT id FROM stages WHERE pipeline_id=? AND kind='active' ORDER BY sort_order,id").all(pid)).map(x=>x.id),ids=req.body.ids;if(!Array.isArray(ids)||ids.length!==actual.length||new Set(ids).size!==actual.length||ids.some(id=>!actual.includes(id)))return fail(res,400,'Укажите все рабочие этапы без повторов');await db.transaction(async()=>{const stmt=db.prepare('UPDATE stages SET sort_order=? WHERE id=?');for(const [index,id] of ids.entries())await stmt.run(index,id)})();res.json({ok:true,ids})});
+app.get('/api/pipelines/:id/transitions',auth,async (req,res)=>{const rules=await stageRules.rulesFor(int(req.params.id));if(!rules)return fail(res,404,'Воронка не найдена');res.json(rules)});
+app.put('/api/pipelines/:id/transitions',auth,admin,async (req,res)=>{try{const rules=await stageRules.saveRules(int(req.params.id),req.body);await audit(req,'pipeline.transitions_updated',{target:`pipeline:${rules.pipeline_id}`,details:`${rules.mode}; переходов: ${rules.transitions.length}${rules.lock_deals?'; без переноса в другие воронки':''}`});res.json(rules)}catch(error){if(error instanceof RuleError)return fail(res,error.status,error.message);throw error}});
+app.get('/api/deals/:id/allowed-stages',auth,async (req,res)=>{const id=int(req.params.id);if(!await dealAllowed(req,id))return fail(res,404,'Сделка не найдена');const deal=await db.prepare('SELECT stage_id FROM deals WHERE id=?').get(id);res.json({stage_id:deal.stage_id,stage_ids:req.user.role==='admin'?(await db.prepare('SELECT id FROM stages WHERE id<>? ORDER BY pipeline_id,sort_order,id').all(deal.stage_id)).map(row=>row.id):await stageRules.allowedTargets(deal.stage_id)})});
 app.get('/api/pipelines/:id/automations',auth,async (req,res)=>{const pid=int(req.params.id);if(!await idExists('pipelines',pid))return fail(res,404,'Воронка не найдена');res.json(await db.prepare('SELECT a.stage_id,a.task_title,a.due_days FROM stage_automations a JOIN stages s ON s.id=a.stage_id WHERE s.pipeline_id=?').all(pid))});
 app.put('/api/stages/:id/automation',auth,admin,async (req,res)=>{const id=int(req.params.id);if(!await idExists('stages',id))return fail(res,404,'Этап не найден');const title=value(req.body.task_title,255),days=Number(req.body.due_days);if(!title||!Number.isSafeInteger(days)||days<0||days>365)return fail(res,400,'Проверьте правило задачи');await db.prepare('INSERT INTO stage_automations (stage_id,task_title,due_days) VALUES (?,?,?) ON CONFLICT(stage_id) DO UPDATE SET task_title=excluded.task_title,due_days=excluded.due_days').run(id,title,days);res.json({stage_id:id,task_title:title,due_days:days})});
 app.delete('/api/stages/:id/automation',auth,admin,async (req,res)=>{const id=int(req.params.id);if(!await idExists('stages',id))return fail(res,404,'Этап не найден');await db.prepare('DELETE FROM stage_automations WHERE stage_id=?').run(id);res.json({ok:true})});
@@ -622,6 +627,7 @@ app.post('/api/deals/bulk',auth,async (req,res)=>{
   if(action==='owner'&&(!await idExists('users',owner)||ownDeals(req)&&owner!==req.user.id))return fail(res,400,'Проверьте ответственного');
   if(action==='stage'&&!await idExists('stages',stage))return fail(res,400,'Проверьте этап');
   if(action==='stage'&&reason===null)return fail(res,400,'Проверьте причину отказа');
+  if(action==='stage'&&req.user.role!=='admin')for(const row of rows){const ruleError=await stageRules.transitionError(row.stage_id,stage);if(ruleError)return fail(res,403,ruleError)}
   if(action==='task'&&(!required(req.body.title,500)||!await idExists('users',owner||req.user.id)||ownTasks(req)&&(owner||req.user.id)!==req.user.id))return fail(res,400,'Проверьте задачу');
   if(action==='field'){
     if(!fieldRow||fieldValue===null||fieldValue.length>1000)return fail(res,400,'Проверьте поле');
@@ -753,6 +759,7 @@ app.patch('/api/deals/:id',auth,requirePermission('deal','edit'),async (req,res)
   if(!required(x.name,255)||!await idExists('stages',stage)||money===null||reason===null||contact&&contact!==old.contact_id&&!await idExists('contacts',contact)||company&&company!==old.company_id&&!await idExists('companies',company)||owner&&!await idExists('users',owner))return fail(res,400,'Проверьте данные сделки');
   if(ownDeals(req)&&owner!==req.user.id)return fail(res,403,'Можно назначать только себе');
   if(contact!==old.contact_id&&contact&&!await entityAllowed(req,'contact',contact)||company!==old.company_id&&company&&!await entityAllowed(req,'company',company))return fail(res,403,'Нет доступа к контакту или компании');
+  if(stage!==old.stage_id&&req.user.role!=='admin'){const ruleError=await stageRules.transitionError(old.stage_id,stage);if(ruleError)return fail(res,403,ruleError)}
   const savedReason=await stageKind(stage)==='lost'?(stage!==old.stage_id&&req.body.loss_reason===undefined?'':reason):'';
   const saved={name:x.name.trim(),stage_id:stage,contact_id:contact,company_id:company,owner_id:owner,amount:money,source:value(x.source,255),tags:value(x.tags,1000),description:value(x.description,10000),loss_reason:savedReason};
   await db.transaction(async ()=>{
@@ -968,7 +975,7 @@ function registerPurge(){
     res.json({ok:true,purged:await purgeRows(req,kind,rows)});
   });
 }
-registerIntegrations(app,db,{auth,admin,event,runStageAutomation,audit});
+registerIntegrations(app,db,{auth,admin,audit,event,entityEvent,logEntityChanges,logDealChanges,runStageAutomation,customValueError,parseTags,taskSchedule,stageRules});
 registerPurge();
 app.use(express.static(resolve(root,'dist')));
 app.get('/{*path}',(req,res) => { if (isApiPath(req.path)) return fail(res,404,'Маршрут не найден'); res.sendFile(resolve(root,'dist/index.html')); });

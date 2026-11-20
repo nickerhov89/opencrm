@@ -234,6 +234,44 @@ CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone);
 CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at,id);
 
+-- API sync: contacts, companies and tasks get updated_at, maintained by a trigger.
+DO $$
+DECLARE t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['contacts','companies','tasks'] LOOP
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = t AND column_name = 'updated_at') THEN
+      EXECUTE format('ALTER TABLE %I ADD COLUMN updated_at TEXT', t);
+      EXECUTE format('UPDATE %I SET updated_at = created_at', t);
+      EXECUTE format('ALTER TABLE %I ALTER COLUMN updated_at SET DEFAULT now_text(), ALTER COLUMN updated_at SET NOT NULL', t);
+    END IF;
+  END LOOP;
+END $$;
+CREATE OR REPLACE FUNCTION trg_touch_updated_at() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.updated_at := now_text();
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_contacts_touch ON contacts;
+CREATE TRIGGER trg_contacts_touch BEFORE UPDATE ON contacts FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
+DROP TRIGGER IF EXISTS trg_companies_touch ON companies;
+CREATE TRIGGER trg_companies_touch BEFORE UPDATE ON companies FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
+DROP TRIGGER IF EXISTS trg_tasks_touch ON tasks;
+CREATE TRIGGER trg_tasks_touch BEFORE UPDATE ON tasks FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
+CREATE INDEX IF NOT EXISTS idx_deals_updated ON deals(updated_at,id);
+CREATE INDEX IF NOT EXISTS idx_contacts_updated ON contacts(updated_at,id);
+CREATE INDEX IF NOT EXISTS idx_companies_updated ON companies(updated_at,id);
+CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at,id);
+
+-- Stage transition rules: with transition_mode='restricted' a deal may only move between stages of
+-- its pipeline along a listed pair; lock_deals=1 keeps deals from being moved to another pipeline.
+ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS transition_mode TEXT NOT NULL DEFAULT 'any' CHECK(transition_mode IN ('any','restricted'));
+ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS lock_deals INTEGER NOT NULL DEFAULT 0 CHECK(lock_deals IN (0,1));
+CREATE TABLE IF NOT EXISTS stage_transitions (from_stage_id BIGINT NOT NULL REFERENCES stages(id) ON DELETE CASCADE, to_stage_id BIGINT NOT NULL REFERENCES stages(id) ON DELETE CASCADE, PRIMARY KEY(from_stage_id,to_stage_id), CHECK(from_stage_id<>to_stage_id));
+CREATE INDEX IF NOT EXISTS idx_stage_transitions_to ON stage_transitions(to_stage_id);
+
+-- Idempotent creates through API v1 (POST /api/v1/leads keeps its own table).
+CREATE TABLE IF NOT EXISTS api_requests (api_key_id BIGINT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, resource TEXT NOT NULL, resource_id BIGINT NOT NULL, created_at TEXT NOT NULL DEFAULT now_text(), PRIMARY KEY(api_key_id,idempotency_key));
+
 CREATE OR REPLACE FUNCTION trg_webhook_delivery_enqueue() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   INSERT INTO webhook_deliveries (endpoint_id,event_id)
@@ -241,19 +279,73 @@ BEGIN
   WHERE w.active = 1 AND EXISTS (SELECT 1 FROM json_array_elements_text(w.events_json::json) event WHERE event = NEW.event_type);
   RETURN NULL;
 END $$;
+-- Events are stored only when an active endpoint subscribes to them.
+CREATE OR REPLACE FUNCTION webhook_emit(kind text, payload json) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM webhook_endpoints w WHERE w.active = 1 AND EXISTS (SELECT 1 FROM json_array_elements_text(w.events_json::json) event WHERE event = kind)) THEN
+    INSERT INTO webhook_events (event_type,payload_json) VALUES (kind, payload::text);
+  END IF;
+END $$;
+CREATE OR REPLACE FUNCTION webhook_deal_payload(d deals) RETURNS jsonb LANGUAGE sql STABLE AS $$
+  SELECT jsonb_build_object('id',d.id,'pipeline_id',(SELECT pipeline_id FROM stages WHERE id=d.stage_id),'stage_id',d.stage_id,'name',d.name,'amount',d.amount,'owner_id',d.owner_id,'contact_id',d.contact_id,'company_id',d.company_id,'source',d.source,'tags',d.tags,'loss_reason',d.loss_reason,'created_at',d.created_at,'updated_at',d.updated_at,'deleted_at',d.deleted_at)
+$$;
 CREATE OR REPLACE FUNCTION trg_webhook_lead_created() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  INSERT INTO webhook_events (event_type,payload_json) VALUES ('lead.created', json_build_object('id',NEW.id,'pipeline_id',NEW.pipeline_id,'title',NEW.title,'contact_name',NEW.contact_name,'company_name',NEW.company_name,'phone',NEW.phone,'email',NEW.email,'source',NEW.source,'status',NEW.status)::text);
+  PERFORM webhook_emit('lead.created', json_build_object('id',NEW.id,'pipeline_id',NEW.pipeline_id,'title',NEW.title,'contact_name',NEW.contact_name,'company_name',NEW.company_name,'phone',NEW.phone,'email',NEW.email,'source',NEW.source,'status',NEW.status));
   RETURN NULL;
 END $$;
 CREATE OR REPLACE FUNCTION trg_webhook_deal_created() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  INSERT INTO webhook_events (event_type,payload_json) VALUES ('deal.created', json_build_object('id',NEW.id,'pipeline_id',(SELECT pipeline_id FROM stages WHERE id=NEW.stage_id),'stage_id',NEW.stage_id,'name',NEW.name,'amount',NEW.amount,'owner_id',NEW.owner_id,'source',NEW.source)::text);
+  PERFORM webhook_emit('deal.created', webhook_deal_payload(NEW)::json);
   RETURN NULL;
 END $$;
 CREATE OR REPLACE FUNCTION trg_webhook_deal_stage_changed() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  INSERT INTO webhook_events (event_type,payload_json) VALUES ('deal.stage_changed', json_build_object('id',NEW.id,'pipeline_id',(SELECT pipeline_id FROM stages WHERE id=NEW.stage_id),'previous_stage_id',OLD.stage_id,'stage_id',NEW.stage_id,'name',NEW.name,'amount',NEW.amount,'owner_id',NEW.owner_id)::text);
+  PERFORM webhook_emit('deal.stage_changed', (webhook_deal_payload(NEW) || jsonb_build_object('previous_stage_id',OLD.stage_id,'previous_pipeline_id',(SELECT pipeline_id FROM stages WHERE id=OLD.stage_id)))::json);
+  RETURN NULL;
+END $$;
+CREATE OR REPLACE FUNCTION trg_webhook_deal_updated() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL THEN
+    PERFORM webhook_emit('deal.deleted', webhook_deal_payload(NEW)::json);
+  ELSIF NEW.deleted_at IS NULL AND (to_jsonb(OLD) - 'updated_at') IS DISTINCT FROM (to_jsonb(NEW) - 'updated_at') THEN
+    PERFORM webhook_emit('deal.updated', webhook_deal_payload(NEW)::json);
+  END IF;
+  RETURN NULL;
+END $$;
+-- Contacts and companies: TG_ARGV[0] is 'contact' or 'company'.
+CREATE OR REPLACE FUNCTION trg_webhook_entity() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    PERFORM webhook_emit(TG_ARGV[0] || '.created', row_to_json(NEW));
+  ELSIF OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL THEN
+    PERFORM webhook_emit(TG_ARGV[0] || '.deleted', row_to_json(NEW));
+  ELSIF NEW.deleted_at IS NULL AND (to_jsonb(OLD) - 'updated_at') IS DISTINCT FROM (to_jsonb(NEW) - 'updated_at') THEN
+    PERFORM webhook_emit(TG_ARGV[0] || '.updated', row_to_json(NEW));
+  END IF;
+  RETURN NULL;
+END $$;
+CREATE OR REPLACE FUNCTION trg_webhook_task() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    PERFORM webhook_emit('task.created', row_to_json(NEW));
+  ELSIF OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL THEN
+    PERFORM webhook_emit('task.deleted', row_to_json(NEW));
+  ELSIF NEW.deleted_at IS NULL AND OLD.completed_at IS NULL AND NEW.completed_at IS NOT NULL THEN
+    PERFORM webhook_emit('task.completed', row_to_json(NEW));
+  ELSIF NEW.deleted_at IS NULL AND (to_jsonb(OLD) - 'updated_at') IS DISTINCT FROM (to_jsonb(NEW) - 'updated_at') THEN
+    PERFORM webhook_emit('task.updated', row_to_json(NEW));
+  END IF;
+  RETURN NULL;
+END $$;
+CREATE OR REPLACE FUNCTION trg_webhook_deal_note() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM webhook_emit('note.created', json_build_object('id',NEW.id,'entity_type','deal','entity_id',NEW.deal_id,'user_id',NEW.user_id,'body',NEW.body,'created_at',NEW.created_at));
+  RETURN NULL;
+END $$;
+CREATE OR REPLACE FUNCTION trg_webhook_entity_note() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM webhook_emit('note.created', json_build_object('id',NEW.id,'entity_type',NEW.entity_type,'entity_id',NEW.entity_id,'user_id',NEW.user_id,'body',NEW.body,'created_at',NEW.created_at));
   RETURN NULL;
 END $$;
 DROP TRIGGER IF EXISTS trg_webhook_delivery_enqueue ON webhook_events;
@@ -264,6 +356,18 @@ DROP TRIGGER IF EXISTS trg_webhook_deal_created ON deals;
 CREATE TRIGGER trg_webhook_deal_created AFTER INSERT ON deals FOR EACH ROW EXECUTE FUNCTION trg_webhook_deal_created();
 DROP TRIGGER IF EXISTS trg_webhook_deal_stage_changed ON deals;
 CREATE TRIGGER trg_webhook_deal_stage_changed AFTER UPDATE OF stage_id ON deals FOR EACH ROW WHEN (OLD.stage_id IS DISTINCT FROM NEW.stage_id) EXECUTE FUNCTION trg_webhook_deal_stage_changed();
+DROP TRIGGER IF EXISTS trg_webhook_deal_updated ON deals;
+CREATE TRIGGER trg_webhook_deal_updated AFTER UPDATE ON deals FOR EACH ROW EXECUTE FUNCTION trg_webhook_deal_updated();
+DROP TRIGGER IF EXISTS trg_webhook_contact ON contacts;
+CREATE TRIGGER trg_webhook_contact AFTER INSERT OR UPDATE ON contacts FOR EACH ROW EXECUTE FUNCTION trg_webhook_entity('contact');
+DROP TRIGGER IF EXISTS trg_webhook_company ON companies;
+CREATE TRIGGER trg_webhook_company AFTER INSERT OR UPDATE ON companies FOR EACH ROW EXECUTE FUNCTION trg_webhook_entity('company');
+DROP TRIGGER IF EXISTS trg_webhook_task ON tasks;
+CREATE TRIGGER trg_webhook_task AFTER INSERT OR UPDATE ON tasks FOR EACH ROW EXECUTE FUNCTION trg_webhook_task();
+DROP TRIGGER IF EXISTS trg_webhook_deal_note ON notes;
+CREATE TRIGGER trg_webhook_deal_note AFTER INSERT ON notes FOR EACH ROW EXECUTE FUNCTION trg_webhook_deal_note();
+DROP TRIGGER IF EXISTS trg_webhook_entity_note ON entity_notes;
+CREATE TRIGGER trg_webhook_entity_note AFTER INSERT ON entity_notes FOR EACH ROW EXECUTE FUNCTION trg_webhook_entity_note();
 `;
 
 const defaultStages = [

@@ -3,9 +3,10 @@ import {lookup} from 'node:dns/promises';
 import http from 'node:http';
 import https from 'node:https';
 import {isIP} from 'node:net';
+import {apiScopes, registerApiV1} from './api-v1.js';
 
-const scopes = ['leads:write', 'deals:read', 'deals:write'];
-const eventTypes = ['lead.created', 'deal.created', 'deal.stage_changed'];
+const scopes = apiScopes;
+export const eventTypes = ['lead.created', 'deal.created', 'deal.updated', 'deal.stage_changed', 'deal.deleted', 'contact.created', 'contact.updated', 'contact.deleted', 'company.created', 'company.updated', 'company.deleted', 'task.created', 'task.updated', 'task.completed', 'task.deleted', 'note.created'];
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const positiveId = value => Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
 const clean = (value, max) => typeof value === 'string' ? value.trim().slice(0, max) : '';
@@ -93,19 +94,22 @@ export async function processWebhookQueue(db, limit = 10) {
     }
     await db.prepare("DELETE FROM webhook_events WHERE created_at<datetime('now','-30 days') AND NOT EXISTS (SELECT 1 FROM webhook_deliveries d WHERE d.event_id=webhook_events.id AND d.status='pending')").run();
     await db.prepare("DELETE FROM api_idempotency WHERE created_at<datetime('now','-30 days')").run();
+    await db.prepare("DELETE FROM api_requests WHERE created_at<datetime('now','-30 days')").run();
   } finally { busy.delete(db); }
   return processed;
 }
 
-export function registerIntegrations(app, db, {auth, admin, event, runStageAutomation, audit = () => {}}) {
-  function apiKey(requiredScope) {
+export function registerIntegrations(app, db, {auth, admin, audit = () => {}, ...helpers}) {
+  // apiKey() accepts any valid key; apiKey('a', 'b') needs at least one of the listed scopes.
+  function apiKey(...anyOf) {
     return async (req, res, next) => {
       const match = /^Bearer (ocrm_[A-Za-z0-9_-]{43})$/.exec(req.get('authorization') || '');
       const key = match && await db.prepare('SELECT id,name,scopes_json FROM api_keys WHERE token_hash=? AND revoked_at IS NULL').get(sha256(match[1]));
       if (!key) return fail(res, 401, 'Нужен действующий ключ API');
-      if (!JSON.parse(key.scopes_json).includes(requiredScope)) return fail(res, 403, 'У ключа нет нужного права');
+      const granted = JSON.parse(key.scopes_json);
+      if (anyOf.length && !anyOf.some(scope => granted.includes(scope))) return fail(res, 403, `У ключа нет нужного права: ${anyOf.join(' или ')}`);
       await db.prepare('UPDATE api_keys SET last_used_at=CURRENT_TIMESTAMP WHERE id=?').run(key.id);
-      req.apiKey = key;
+      req.apiKey = {id: key.id, name: key.name, scopes: granted};
       next();
     };
   }
@@ -129,39 +133,8 @@ export function registerIntegrations(app, db, {auth, admin, event, runStageAutom
     res.json({ok: true});
   });
 
-  app.get('/api/v1/pipelines', apiKey('deals:read'), async (_req, res) => {
-    const rows = await db.prepare('SELECT id,name,sort_order FROM pipelines ORDER BY sort_order,id').all();
-    const stages = await db.prepare('SELECT id,pipeline_id,name,kind,sort_order FROM stages ORDER BY pipeline_id,sort_order,id').all();
-    res.json({items: rows.map(row => ({...row, stages: stages.filter(stage => stage.pipeline_id === row.id)}))});
-  });
-  const dealQuery = `SELECT d.id,d.name,d.stage_id,s.pipeline_id,s.kind stage_kind,d.owner_id,d.contact_id,d.company_id,d.amount,d.source,d.tags,d.description,d.loss_reason,d.created_at,d.updated_at
-    FROM deals d JOIN stages s ON s.id=d.stage_id WHERE d.deleted_at IS NULL`;
-  app.get('/api/v1/deals', apiKey('deals:read'), async (req, res) => {
-    const after = req.query.after == null ? 0 : Number(req.query.after), limit = req.query.limit == null ? 50 : Number(req.query.limit);
-    if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) return fail(res, 400, 'Проверьте пагинацию');
-    const rows = await db.prepare(`${dealQuery} AND d.id>? ORDER BY d.id LIMIT ?`).all(after, limit + 1);
-    res.json({items: rows.slice(0, limit), next_after: rows.length > limit ? rows[limit - 1].id : null});
-  });
-  app.get('/api/v1/deals/:id', apiKey('deals:read'), async (req, res) => {
-    const deal = await db.prepare(`${dealQuery} AND d.id=?`).get(positiveId(req.params.id));
-    if (!deal) return fail(res, 404, 'Сделка не найдена');
-    res.json(deal);
-  });
-  app.patch('/api/v1/deals/:id/stage', apiKey('deals:write'), async (req, res) => {
-    const id = positiveId(req.params.id), stageId = positiveId(req.body.stage_id), deal = await db.prepare('SELECT d.id,d.stage_id,d.owner_id,s.pipeline_id FROM deals d JOIN stages s ON s.id=d.stage_id WHERE d.id=? AND d.deleted_at IS NULL').get(id);
-    if (!deal) return fail(res, 404, 'Сделка не найдена');
-    const stage = await db.prepare('SELECT id,pipeline_id,kind,name FROM stages WHERE id=?').get(stageId);
-    if (!stage || stage.pipeline_id !== deal.pipeline_id) return fail(res, 400, 'Выберите этап этой воронки');
-    if (stage.id === deal.stage_id) return res.json({id, stage_id: stage.id, unchanged: true});
-    const reason = clean(req.body.loss_reason, 120);
-    if (stage.kind === 'lost' && !reason) return fail(res, 400, 'Укажите причину отказа');
-    await db.transaction(async () => {
-      await db.prepare('UPDATE deals SET stage_id=?,loss_reason=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(stage.id, stage.kind === 'lost' ? reason : '', id);
-      await event(id, null, `Этап изменён через API: ${stage.name}`);
-      await runStageAutomation(id, stage.id, deal.owner_id, null);
-    })();
-    res.json({id, stage_id: stage.id});
-  });
+  registerApiV1(app, db, {...helpers, apiKey, audit});
+
   app.post('/api/v1/leads', apiKey('leads:write'), async (req, res) => {
     const raw = req.body || {}, pipeline = positiveId(raw.pipeline_id), title = clean(raw.title, 255), contact = clean(raw.contact_name, 255), company = clean(raw.company_name, 255), phone = clean(raw.phone, 80), email = clean(raw.email, 254).toLowerCase();
     if (!await db.prepare('SELECT id FROM pipelines WHERE id=?').get(pipeline) || !title || (!contact && !company && !phone && !email) || email && !email.includes('@')) return fail(res, 400, 'Проверьте данные заявки');
