@@ -1,0 +1,51 @@
+.security-page,.audit-page{display:flex;flex-direction:column;gap:18px}
+.security-page>.settings-section-heading,.audit-page>.settings-section-heading{margin-bottom:0}
+.security-page .settings-card{max-width:1000px}
+.security-page .settings-card-title h2{display:flex;align-items:center;gap:8px}
+.security-badge{display:inline-flex;align-items:center;height:22px;padding:0 9px;border-radius:11px;font-size:11px;font-weight:600;white-space:nowrap}
+.security-badge.ok{background:#e6f3e2;color:#46803a}
+.security-badge.muted{background:#eef1f3;color:#7b8790}
+.security-badge.danger{background:#fbe7e7;color:#b44c4c}
+.security-notice{margin:0;padding:11px 16px;background:#eaf5e7;border:1px solid #cfe5c8;color:#3f6d35;font-size:12px;max-width:1000px}
+.security-error{margin:10px 0 0;color:#c05454;font-size:12px}
+.security-hint{margin:6px 0 0;color:#7b8790;font-size:12px}
+.security-secret{padding:16px 25px;border-bottom:1px solid #eef0f1;font-size:12px;color:#53616d;line-height:1.55}
+.security-secret p{margin:0 0 8px}
+.security-secret code{display:inline-block;margin:0 0 10px;padding:9px 12px;background:#f3f6f9;border:1px solid #dbe3ea;font-size:15px;letter-spacing:1.5px;color:#2f4e69;overflow-wrap:anywhere}
+.security-secret a{color:#3978b1}
+.security-actions{gap:10px}
+.security-actions>button:not(.blue-btn){border:0;background:none;color:#7d8891;font-size:12px}
+.security-link{border:0;background:none;color:#3978b1;font-size:12px;cursor:pointer;white-space:nowrap}
+.security-link:disabled{color:#a5aeb5}
+.danger-btn{height:34px;padding:0 16px;border:1px solid #e2b4b4;background:#fff;color:#b44c4c;font-size:12px;font-weight:600;border-radius:2px;cursor:pointer}
+.danger-btn:disabled{opacity:.55}
+.user-access-actions{margin-top:18px;padding:18px 20px}
+.user-access-actions h3{margin:0 0 10px;font-size:13px;color:#414a52}
+.user-access-status{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px}
+.user-access-buttons{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.user-access-buttons>button,.user-access-reset>button:not(.blue-btn){display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid #dce1e5;background:#fff;color:#3f6f9f;font-size:12px;border-radius:2px;cursor:pointer}
+.user-access-buttons>button.danger{color:#b44c4c;border-color:#ecc8c8}
+.user-access-buttons button:disabled{opacity:.55;cursor:default}
+.user-access-reset{display:flex;flex-wrap:wrap;gap:8px;width:100%}
+.user-access-reset input{flex:1;min-width:200px;height:32px;border:1px solid #cbd2d7;border-radius:2px;padding:6px 10px;font-size:12px}
+.user-disabled-badge{margin-left:6px;font-size:10px;font-weight:600;color:#b44c4c;background:#fbe7e7;padding:2px 6px;border-radius:9px}
+.audit-toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:14px 20px;border-bottom:1px solid #e8ebed}
+.audit-toolbar label{display:flex;align-items:center;gap:8px;color:#9aa4ad;border:1px solid #dce1e4;padding:0 10px;height:34px;width:min(100%,320px)}
+.audit-toolbar input{border:0;outline:0;font-size:12px;width:100%;min-width:0;color:#3e4a53}
+.audit-toolbar select{height:34px;border:1px solid #dde2e6;background:#fff;color:#55626c;font-size:12px;padding:0 8px}
+.audit-toolbar span{margin-left:auto;font-size:11px;color:#9aa3aa}
+.audit-table{overflow-x:auto}
+.audit-row{display:grid;grid-template-columns:150px minmax(130px,1fr) minmax(170px,1.2fr) minmax(140px,1fr) minmax(200px,2fr) 110px;gap:12px;align-items:center;min-width:980px;padding:9px 20px;border-bottom:1px solid #eef0f1;font-size:12px;color:#55626c}
+.audit-row>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.audit-head{background:#f7f7f8;color:#8e969d;font-size:10px;font-weight:700;letter-spacing:.2px}
+.audit-row.warning>span:nth-child(3){color:#b0683a;font-weight:600}
+.audit-pages{display:flex;align-items:center;justify-content:flex-end;gap:12px;padding:12px 20px;font-size:12px;color:#7b8790}
+.audit-pages button{border:1px solid #dce1e5;background:#fff;color:#3978b1;height:30px;padding:0 12px;font-size:12px;cursor:pointer}
+.audit-pages button:disabled{color:#b0b8be;cursor:default}
+.trash-purge{color:#b44c4c!important}
+.trash-toolbar{display:flex;justify-content:flex-end;margin:-8px 0 12px}
+.trash-toolbar button{border:1px solid #ecc8c8;background:#fff;color:#b44c4c;height:32px;padding:0 14px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:6px}
+.trash-toolbar button:disabled{opacity:.5;cursor:default}
+.auth-secondary{display:block;margin:10px auto 0;border:0;background:none;color:#7d8891;font-size:12px;cursor:pointer}
+@media(max-width:760px){.security-secret{padding:14px 16px}.user-access-actions{padding:14px}.audit-toolbar{padding:12px}.audit-toolbar span{margin-left:0}}
+.trash-actions{display:flex;gap:4px 12px;flex-wrap:wrap}

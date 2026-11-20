@@ -27,7 +27,8 @@ test('первый вход, роли, сделка, задача и журна�
     await request('/setup','POST',{name:'Another',email:'a@example.test',password:'passphrase-for-tests'},409);
     assert.equal((await request('/settings')).name,'OpenCRM');
     assert.equal((await request('/settings','PATCH',{name:'Pilot workspace'})).name,'Pilot workspace');
-    const member=await request('/users','POST',{name:'Member',email:'member@example.test',password:'member-password',role:'member'},201);
+    const allRights={create:true,edit:true,delete:true,export:true};
+    const member=await request('/users','POST',{name:'Member',email:'member@example.test',password:'member-password',role:'member',permissions:{deal:allRights,contact:allRights,company:allRights,task:{create:true,edit:true,delete:true}}},201);
     const group=await request('/user-groups','POST',{name:'Sales Team'},201);
     await request('/user-groups','POST',{name:'sales team'},409);
     await request('/users/'+member.id,'PATCH',{name:'Member',email:'member@example.test',role:'member',group_id:group.id});

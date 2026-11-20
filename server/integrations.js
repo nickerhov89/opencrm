@@ -97,7 +97,7 @@ export async function processWebhookQueue(db, limit = 10) {
   return processed;
 }
 
-export function registerIntegrations(app, db, {auth, admin, event, runStageAutomation}) {
+export function registerIntegrations(app, db, {auth, admin, event, runStageAutomation, audit = () => {}}) {
   function apiKey(requiredScope) {
     return (req, res, next) => {
       const match = /^Bearer (ocrm_[A-Za-z0-9_-]{43})$/.exec(req.get('authorization') || '');
@@ -119,11 +119,13 @@ export function registerIntegrations(app, db, {auth, admin, event, runStageAutom
     if (db.prepare('SELECT COUNT(*) n FROM api_keys WHERE revoked_at IS NULL').get().n >= 50) return fail(res, 400, 'Не больше 50 активных ключей');
     const token = `ocrm_${randomBytes(32).toString('base64url')}`;
     const row = db.prepare('INSERT INTO api_keys (name,token_hash,prefix,scopes_json) VALUES (?,?,?,?)').run(name, sha256(token), token.slice(0, 13), JSON.stringify(selected));
+    audit(req, 'api_key.created', {target: `api_key:${row.lastInsertRowid}`, details: `${name}; права: ${selected.join(', ')}`});
     res.status(201).json({id: row.lastInsertRowid, name, prefix: token.slice(0, 13), scopes: selected, token});
   });
   app.delete('/api/integrations/keys/:id', auth, admin, (req, res) => {
     const result = db.prepare('UPDATE api_keys SET revoked_at=CURRENT_TIMESTAMP WHERE id=? AND revoked_at IS NULL').run(positiveId(req.params.id));
     if (!result.changes) return fail(res, 404, 'Ключ не найден');
+    audit(req, 'api_key.revoked', {target: `api_key:${positiveId(req.params.id)}`});
     res.json({ok: true});
   });
 
@@ -189,6 +191,7 @@ export function registerIntegrations(app, db, {auth, admin, event, runStageAutom
     if (db.prepare('SELECT COUNT(*) n FROM webhook_endpoints').get().n >= 20) return fail(res, 400, 'Не больше 20 webhook-адресов');
     const secret = randomBytes(32).toString('hex');
     const row = db.prepare('INSERT INTO webhook_endpoints (name,url,secret,events_json) VALUES (?,?,?,?)').run(name, url, secret, JSON.stringify(selected));
+    audit(req, 'webhook.created', {target: `webhook:${row.lastInsertRowid}`, details: `${name}; ${url}`});
     res.status(201).json({id: row.lastInsertRowid, name, url, events: selected, active: 1, secret});
   });
   app.patch('/api/integrations/webhooks/:id', auth, admin, (req, res) => {
@@ -197,17 +200,20 @@ export function registerIntegrations(app, db, {auth, admin, event, runStageAutom
     const name = req.body.name === undefined ? old.name : clean(req.body.name, 120), url = req.body.url === undefined ? old.url : clean(req.body.url, 2048), selected = req.body.events === undefined ? JSON.parse(old.events_json) : req.body.events, active = req.body.active === undefined ? !!old.active : req.body.active;
     if (!name || !validWebhookUrl(url) || !Array.isArray(selected) || !selected.length || new Set(selected).size !== selected.length || selected.some(type => !eventTypes.includes(type)) || typeof active !== 'boolean') return fail(res, 400, 'Проверьте настройки webhook');
     db.prepare('UPDATE webhook_endpoints SET name=?,url=?,events_json=?,active=? WHERE id=?').run(name, url, JSON.stringify(selected), active ? 1 : 0, id);
+    audit(req, 'webhook.updated', {target: `webhook:${id}`, details: `${name}; ${url}; ${active ? 'активен' : 'выключен'}`});
     res.json({id, name, url, events: selected, active: active ? 1 : 0});
   });
   app.delete('/api/integrations/webhooks/:id', auth, admin, (req, res) => {
     const result = db.prepare('DELETE FROM webhook_endpoints WHERE id=?').run(positiveId(req.params.id));
     if (!result.changes) return fail(res, 404, 'Webhook не найден');
+    audit(req, 'webhook.deleted', {target: `webhook:${positiveId(req.params.id)}`});
     res.json({ok: true});
   });
   app.post('/api/integrations/webhooks/:id/rotate-secret', auth, admin, (req, res) => {
     const id = positiveId(req.params.id), secret = randomBytes(32).toString('hex');
     const result = db.prepare('UPDATE webhook_endpoints SET secret=? WHERE id=?').run(secret, id);
     if (!result.changes) return fail(res, 404, 'Webhook не найден');
+    audit(req, 'webhook.secret_rotated', {target: `webhook:${id}`});
     res.json({id, secret});
   });
   app.post('/api/integrations/webhooks/:id/test', auth, admin, (req, res) => {

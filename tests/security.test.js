@@ -34,7 +34,7 @@ test('cross-origin writes are rejected and repeated login failures are throttled
     assert.equal(response.status,403);
     response=await post('/login',{email:'admin@example.test',password:'secure-test-password'},{Origin:base});
     assert.equal(response.status,200);
-    for(let attempt=0;attempt<20;attempt++){
+    for(let attempt=0;attempt<10;attempt++){
       response=await post('/login',{email:'admin@example.test',password:'wrong-password'});
       assert.equal(response.status,401);
     }

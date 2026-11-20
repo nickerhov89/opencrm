@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { normalizePermissions, fullPermissions } from './security.js';
 
 export function createDb(path = process.env.DATABASE_PATH || './data/opencrm.db') {
   const file = path === ':memory:' ? path : resolve(path);
@@ -126,6 +127,27 @@ export function createDb(path = process.env.DATABASE_PATH || './data/opencrm.db'
   if(!userColumns.includes('company_access'))db.exec("ALTER TABLE users ADD COLUMN company_access TEXT NOT NULL DEFAULT 'all' CHECK(company_access IN ('all','own'))");
   if(!userColumns.includes('group_id'))db.exec('ALTER TABLE users ADD COLUMN group_id INTEGER REFERENCES user_groups(id) ON DELETE SET NULL');
   if(!userColumns.includes('permissions_json'))db.exec("ALTER TABLE users ADD COLUMN permissions_json TEXT NOT NULL DEFAULT '{}'");
+  if(!userColumns.includes('disabled_at'))db.exec('ALTER TABLE users ADD COLUMN disabled_at TEXT');
+  if(!userColumns.includes('totp_secret'))db.exec('ALTER TABLE users ADD COLUMN totp_secret TEXT');
+  if(!userColumns.includes('totp_pending_secret'))db.exec('ALTER TABLE users ADD COLUMN totp_pending_secret TEXT');
+  if(!userColumns.includes('totp_last_counter'))db.exec('ALTER TABLE users ADD COLUMN totp_last_counter INTEGER NOT NULL DEFAULT -1');
+  if(!userColumns.includes('password_changed_at'))db.exec('ALTER TABLE users ADD COLUMN password_changed_at TEXT');
+  if(!db.prepare('PRAGMA table_info(sessions)').all().some(column=>column.name==='created_at'))db.exec('ALTER TABLE sessions ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)');
+  db.exec("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE SET NULL, actor TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, target TEXT NOT NULL DEFAULT '', details TEXT NOT NULL DEFAULT '', ip TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+  db.exec('CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at,id)');
+  // Permissions used to be "allowed unless explicitly denied". They are now checked as
+  // "denied unless explicitly granted", so existing members get their old effective rights written out once.
+  if(!db.prepare("SELECT 1 FROM app_settings WHERE key='permissions_explicit_v1'").get()){
+    db.transaction(()=>{
+      const update=db.prepare('UPDATE users SET permissions_json=? WHERE id=?');
+      for(const user of db.prepare('SELECT id,permissions_json FROM users').all()){
+        let parsed={};try{parsed=JSON.parse(user.permissions_json||'{}')}catch{}
+        update.run(JSON.stringify(normalizePermissions(parsed,fullPermissions())),user.id);
+      }
+      db.prepare("INSERT INTO app_settings (key,value) VALUES ('permissions_explicit_v1','1')").run();
+    })();
+  }
   if (!db.prepare('SELECT id FROM pipelines LIMIT 1').get()) {
     const pipeline = db.prepare('INSERT INTO pipelines (name) VALUES (?)').run('Воронка — новые лиды');
     const stage = db.prepare('INSERT INTO stages (pipeline_id,name,color,sort_order,kind) VALUES (?,?,?,?,?)');
