@@ -4,6 +4,8 @@
 //   reset-password <email>        prints a new random password
 //   reset-2fa <email>             turns off two-factor sign-in
 //   enable <email>                re-enables a disabled account
+//   sync-ids                      after loading rows with explicit IDs (e.g. from amoCRM), moves the ID
+//                                 sequences past the largest IDs; the app also does this on every start
 // Every command except create-admin also ends all sessions of that user. All are written to the audit log.
 import {randomBytes,scryptSync} from 'node:crypto';
 import {createDb} from '../server/db.js';
@@ -11,7 +13,13 @@ import {createDb} from '../server/db.js';
 const [command,rawEmail,...nameParts]=process.argv.slice(2);
 const email=String(rawEmail||'').trim().toLowerCase();
 const commands=['create-admin','reset-password','reset-2fa','enable'];
-if(!commands.includes(command)||!email||!email.includes('@')||email.length>254){console.error(`Использование: node scripts/admin.mjs ${commands.join('|')} <email> [имя]`);process.exit(1)}
+if(command==='sync-ids'){
+  const db=await createDb();
+  try{const fixed=(await db.query('SELECT sync_id_sequences() n')).rows[0].n;console.log(`Счётчики ID выровнены, исправлено таблиц: ${fixed}`)}
+  finally{await db.close()}
+  process.exit(0);
+}
+if(!commands.includes(command)||!email||!email.includes('@')||email.length>254){console.error(`Использование: node scripts/admin.mjs ${commands.join('|')} <email> [имя]\n               node scripts/admin.mjs sync-ids`);process.exit(1)}
 
 const newPassword=()=>{const password=randomBytes(12).toString('base64url'),salt=randomBytes(16).toString('hex');return {password,hash:`${salt}:${scryptSync(password,salt,64).toString('hex')}`}};
 const log=(userId,target)=>db.prepare("INSERT INTO audit_log (user_id,actor,action,target,details,ip) VALUES (?,'cli',?,?,?,'')").run(userId,`cli.${command}`,target,'Команда на сервере');

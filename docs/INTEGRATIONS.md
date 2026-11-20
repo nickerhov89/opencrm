@@ -34,7 +34,9 @@ API keys are instance-wide service credentials: the visibility settings of indiv
 - History entries made through the API read "через API («key name»)" and have no author.
 - `tags` accepts a comma-separated string or a list of strings and is returned as a string `"vip, portal"`.
 - **Lists** use ascending ID cursor pagination: `?limit=50&after=0`. `limit` is 1–250 (default 50). Pass the returned `next_after` as `after` for the next page; `null` means there are no more rows. Response: `{ "items": [...], "next_after": 123 }`.
-- **Sync**: every list takes `updated_since` and `created_since` (ISO 8601 or `YYYY-MM-DD HH:MM:SS`, UTC). Store the time of your last sync and request `updated_since=<that time>` to get changed records; use webhooks for deletions.
+- **Sync**: every list takes `updated_since` and `created_since` (ISO 8601 or `YYYY-MM-DD HH:MM:SS`, UTC). Store the time of your last sync and request `updated_since=<that time>` to get changed records. `updated_at` moves on every real change, including moving to the trash.
+- **Deleted records**: lists of deals, contacts, companies and tasks return live records by default. `include_deleted=1` adds records in the trash, `deleted_since=<time>` returns only records moved to the trash since then. Every record has `deleted_at` (`null` while live).
+- **Custom field filter**: lists of deals, contacts and companies take `custom_field[<field ID>]=<value>` (exact match, ignoring case), for example `/api/v1/contacts?custom_field[12]=@username`.
 - **Idempotency**: `POST` for deals, contacts, companies, tasks and leads accepts an `Idempotency-Key` header (letters, digits, `. _ ~ -`, up to 128 characters). Repeating the same request with the same key returns HTTP 200 and the original record instead of creating a duplicate; the same key with different data returns 409. Keys are kept for 30 days per API key.
 
 ## Custom fields
@@ -94,7 +96,7 @@ PUT /api/v1/pipelines/7/transitions
 ## Deals
 
 ```text
-GET    /api/v1/deals                 # filters: pipeline_id, stage_id, stage_kind, owner_id, contact_id, company_id, q, updated_since, created_since
+GET    /api/v1/deals                 # filters: pipeline_id, stage_id, stage_kind, owner_id, contact_id, company_id, q, closed_since, closed_before, custom_field[ID], updated_since, created_since, include_deleted, deleted_since
 GET    /api/v1/deals/:id
 POST   /api/v1/deals                 # deals:write
 PATCH  /api/v1/deals/:id
@@ -119,14 +121,22 @@ curl -X POST 'https://crm.example.com/api/v1/deals' \
   --data '{"name":"Order 1001","pipeline_id":1,"amount":150000,"owner_id":2,"contact_ids":[15],"company_id":4,"source":"Portal","tags":["portal"],"custom_fields":{"3":"1001"}}'
 ```
 
-Fields: `name` (required on create), `stage_id` or `pipeline_id` (then the deal goes to the first working stage), `amount` (integer ≥ 0), `owner_id`, `contact_ids` (the first is the main contact; on `PATCH` the list replaces all links, `[]` removes them), `company_id`, `source`, `tags`, `description`, `loss_reason` (for a lost stage), `custom_fields`. A deal response contains `id`, `name`, `stage_id`, `pipeline_id`, `stage_kind`, `owner_id`, `contact_id` (main), `contact_ids`, `company_id`, `amount`, `source`, `tags`, `description`, `loss_reason`, `custom_fields`, `created_at`, `updated_at`. Contact phones and emails are not part of a deal: read them with `contacts:read`.
+Fields: `name` (required on create), `stage_id` or `pipeline_id` (then the deal goes to the first working stage), `amount` (integer ≥ 0), `owner_id`, `contact_ids` (the first is the main contact; on `PATCH` the list replaces all links, `[]` removes them), `company_id`, `source`, `tags`, `description`, `loss_reason` (for a lost stage), `custom_fields`. A deal response contains `id`, `name`, `stage_id`, `pipeline_id`, `stage_kind`, `owner_id`, `contact_id` (main), `contact_ids`, `company_id`, `amount`, `source`, `tags`, `description`, `loss_reason`, `custom_fields`, `created_at`, `updated_at`, `closed_at`, `deleted_at`. `closed_at` is set when the deal enters a won or lost stage and cleared when it returns to a working stage; use it to date sales. Contact phones and emails are not part of a deal: read them with `contacts:read`.
 
-Changing `stage_id` (or `pipeline_id` to move to another pipeline) checks the transition rules, writes history, runs the stage task automation and emits `deal.stage_changed`. Notes and calls may name the employee in `user_id` to show them as the author.
+Changing `stage_id` (or `pipeline_id` to move to another pipeline) checks the transition rules, writes history, runs the stage task automation and emits `deal.stage_changed`.
+
+### Stage history
+
+```text
+GET /api/v1/stage-changes        # deals:read; filters: deal_id, pipeline_id, to_stage_id, user_id, api_key_id, changed_since (= created_since), changed_before
+```
+
+Every deal creation and stage change is a row with its own `id`: `deal_id`, `from_stage_id`, `from_pipeline_id` (both `null` for the creation), `to_stage_id`, `to_pipeline_id`, `user_id` or `api_key_id` of whoever made the change, `changed_by` (`{"type": "user", "id": 2}`, `{"type": "api_key", "id": 5}` or `null` for system changes such as imports), and `changed_at`. Rows come in ID order with the usual `after`/`limit` pagination, so two changes in the same second stay separate. Notes and calls may name the employee in `user_id` to show them as the author.
 
 ## Contacts and companies
 
 ```text
-GET    /api/v1/contacts              # filters: q, email, phone, company_id, owner_id, tag, updated_since, created_since
+GET    /api/v1/contacts              # filters: q, email, phone, telegram, company_id, owner_id, tag, custom_field[ID], updated_since, created_since, include_deleted, deleted_since
 GET    /api/v1/contacts/:id
 POST   /api/v1/contacts              # contacts:write
 PATCH  /api/v1/contacts/:id
@@ -134,18 +144,19 @@ DELETE /api/v1/contacts/:id
 GET    /api/v1/contacts/:id/notes
 POST   /api/v1/contacts/:id/notes    # {"body": "...", "user_id": 2}
 
-GET    /api/v1/companies             # filters: q, email, phone, owner_id, tag, updated_since, created_since
+GET    /api/v1/companies             # filters: q, email, phone, owner_id, tag, custom_field[ID], updated_since, created_since, include_deleted, deleted_since
 ...                                  # the same routes as contacts, scope companies:*
 ```
 
-Contact fields: `name` (required), `phone`, `email`, `position`, `company_id`, `owner_id`, `notes`, `tags`, `custom_fields`. Company fields: `name` (required), `phone`, `email`, `website`, `address`, `owner_id`, `notes`, `tags`, `custom_fields`.
+Contact fields: `name` (required), `phone`, `email`, `telegram`, `position`, `company_id`, `owner_id`, `notes`, `tags`, `custom_fields`. Company fields: `name` (required), `phone`, `email`, `website`, `address`, `owner_id`, `notes`, `tags`, `custom_fields`.
 
-`q` searches the name, email and phone. `email` matches exactly, ignoring case. `phone` compares digits only (the last ten), so `8 900 555-44-33` finds `+7 (900) 555-44-33`. To find or create a contact from a portal, search by `phone` or `email` first and create one only if nothing is found.
+`q` searches the name, email and phone. `email` matches exactly, ignoring case. `phone` compares digits only (the last ten), so `8 900 555-44-33` finds `+7 (900) 555-44-33`. `telegram` ignores `@`, `https://t.me/` and letter case, so `@Name`, `name` and `t.me/name` find the same contact. To find or create a contact from a portal, search by `phone` or `email` first and create one only if nothing is found.
 
 ## Tasks
 
 ```text
-GET    /api/v1/tasks                 # filters: deal_id, contact_id, company_id, owner_id, state=open|done|all, due_from, due_to, updated_since, created_since
+GET    /api/v1/tasks                 # filters: deal_id, contact_id, company_id, owner_id, task_type, state=open|done|all, due_from, due_to, updated_since, created_since, include_deleted, deleted_since
+GET    /api/v1/task-types            # preset types (items) and other types already used (used)
 GET    /api/v1/tasks/:id
 POST   /api/v1/tasks                 # tasks:write
 PATCH  /api/v1/tasks/:id
@@ -160,11 +171,23 @@ PATCH /api/v1/tasks/55
 {"completed": true, "result": "Agreed on a meeting"}
 ```
 
-Fields: `title` (required), `task_type` (default `Связаться`), `due_at`, `duration_minutes` (0–1440, needs `due_at`), `all_day` (needs `due_at`), `owner_id`, and links: `deal_id` and/or `contact_id`, or `company_id` alone. Without `owner_id` the task goes to the owner of the linked record; if it has none, the request returns 400. `completed: true` closes the task with an optional `result`, `completed: false` reopens it. Tasks of deals are written to the deal history. A response also contains `completed`, `completed_at`, `completion_result`, `created_at`, `updated_at`.
+Fields: `title` (required), `task_type` (default `Связаться`; the preset names such as `Встреча` are stable, reports can rely on them), `due_at`, `duration_minutes` (0–1440, needs `due_at`), `all_day` (needs `due_at`), `owner_id`, and links: `deal_id` and/or `contact_id`, or `company_id` alone. Without `owner_id` the task goes to the owner of the linked record; if it has none, the request returns 400. `completed: true` closes the task with an optional `result`, `completed: false` reopens it. Tasks of deals are written to the deal history. A response also contains `completed`, `completed_at`, `completion_result`, `created_at`, `updated_at`.
+
+## Notes of all records
+
+```text
+GET /api/v1/notes?entity_type=deal       # deal | contact | company (required); filters: entity_id, created_since, updated_since; after/limit
+```
+
+Needs the read scope of that type. Items: `id`, `entity_type`, `entity_id`, `body`, `user_id`, `created_at`, `updated_at`, and `pinned` for deal notes. IDs of deal notes and of contact/company notes are separate sequences, so paginate one `entity_type` at a time.
 
 ## Employees
 
 `GET /api/v1/users` (`users:read`) returns `id`, `name`, `email`, `role`, `group_id`, `group_name`, `active`, `created_at`. Use the IDs as `owner_id` and `user_id`; disabled employees cannot be assigned.
+
+## Loading data from amoCRM
+
+A one-time load that keeps amoCRM IDs goes straight into PostgreSQL; see [AMOCRM_IMPORT.md](AMOCRM_IMPORT.md).
 
 ## Leads
 
@@ -196,7 +219,7 @@ Create an endpoint in Settings → Интеграции with an HTTPS URL and se
 | `task.created` / `task.updated` / `task.completed` / `task.deleted` | A task is created, changed, completed, or moved to the trash |
 | `note.created` | A note is added to a deal, contact or company (`data.entity_type`, `data.entity_id`) |
 
-Events fire for changes made in the interface and through the API alike. Deal events carry the deal fields (`id`, `pipeline_id`, `stage_id`, `name`, `amount`, `owner_id`, `contact_id`, `company_id`, `source`, `tags`, `loss_reason`, timestamps); contact, company and task events carry the record's columns. Events are stored only while an active endpoint subscribes to them.
+Events fire for changes made in the interface and through the API alike. Deal events carry the deal fields (`id`, `pipeline_id`, `stage_id`, `name`, `amount`, `owner_id`, `contact_id`, `company_id`, `source`, `tags`, `loss_reason`, `created_at`, `updated_at`, `closed_at`, `deleted_at`) and `changed_by: {"user_id": …, "api_key_id": …}` — who made the change (both `null` for system changes); contact, company and task events carry the record's columns. Events are stored only while an active endpoint subscribes to them.
 
 Each request is an HTTP POST with `Content-Type: application/json`. Example body:
 

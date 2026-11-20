@@ -4,6 +4,7 @@
 // transition rules of pipelines do.
 import {createHash} from 'node:crypto';
 import {RuleError} from './stage-rules.js';
+import {taskTypes} from '../src/task-types.js';
 
 export const apiScopes = ['leads:write', 'deals:read', 'deals:write', 'contacts:read', 'contacts:write', 'companies:read', 'companies:write', 'tasks:read', 'tasks:write', 'users:read', 'pipelines:write', 'fields:write'];
 
@@ -100,6 +101,29 @@ export function registerApiV1(app, db, helpers) {
     const updated = timestamp(req.query.updated_since, 'updated_since'), created = timestamp(req.query.created_since, 'created_since');
     if (updated) { where.push(`${alias}.updated_at>=?`); params.push(updated); }
     if (created) { where.push(`${alias}.created_at>=?`); params.push(created); }
+  }
+  // By default lists hold live records; include_deleted=1 adds the ones in the trash (deleted_at is
+  // set), deleted_since=<time> returns only records moved to the trash since then.
+  function deletedFilter(req, alias, where, params, live = `${alias}.deleted_at IS NULL`) {
+    const since = timestamp(req.query.deleted_since, 'deleted_since');
+    if (since) { where.push(`${alias}.deleted_at IS NOT NULL AND ${alias}.deleted_at>=?`); params.push(since); return; }
+    const include = req.query.include_deleted == null ? '' : String(req.query.include_deleted);
+    if (!['', '0', '1', 'true', 'false'].includes(include)) bad('include_deleted: 1 или 0');
+    if (!['1', 'true'].includes(include)) where.push(live);
+  }
+  // custom_field[<field id>]=<value>: exact match, ignoring case.
+  async function customFieldFilter(req, type, alias, where, params) {
+    for (const [key, raw] of Object.entries(req.query)) {
+      const match = /^custom_field\[(\d+)\]$/.exec(key);
+      const pairs = match ? [[match[1], raw]] : key === 'custom_field' && raw && typeof raw === 'object' ? Object.entries(raw) : [];
+      for (const [rawId, value] of pairs) {
+        const id = positiveId(rawId), field = id && await db.prepare('SELECT id FROM custom_fields WHERE id=? AND entity_type=?').get(id, type);
+        if (!field) bad(`custom_field[${rawId}]: поле не найдено для этого типа записей`);
+        if (typeof value !== 'string' || value.length > 1000) bad(`custom_field[${rawId}]: строка до 1000 символов`);
+        where.push(`EXISTS(SELECT 1 FROM custom_field_values cv WHERE cv.field_id=? AND cv.entity_id=${alias}.id AND lower(cv.value)=lower(?))`);
+        params.push(id, value.trim());
+      }
+    }
   }
 
   // ---------- shared lookups and writers ----------
@@ -198,6 +222,47 @@ export function registerApiV1(app, db, helpers) {
   app.get('/api/v1/users', apiKey('users:read'), route(async (_req, res) => {
     const rows = await db.prepare('SELECT u.id,u.name,u.email,u.role,u.group_id,g.name group_name,u.disabled_at,u.created_at FROM users u LEFT JOIN user_groups g ON g.id=u.group_id ORDER BY u.id').all();
     res.json({items: rows.map(({disabled_at, ...row}) => ({...row, active: !disabled_at}))});
+  }));
+
+  app.get('/api/v1/task-types', apiKey('tasks:read', 'tasks:write'), route(async (_req, res) => {
+    const used = (await db.prepare("SELECT DISTINCT task_type FROM tasks WHERE task_type<>'' ORDER BY task_type").all()).map(row => row.task_type);
+    res.json({items: taskTypes, used: used.filter(type => !taskTypes.includes(type))});
+  }));
+
+  // ---------- stage history (all deals) ----------
+  app.get('/api/v1/stage-changes', apiKey('deals:read'), route(async (req, res) => {
+    const where = ['TRUE'], params = [];
+    for (const key of ['deal_id', 'user_id', 'api_key_id']) {
+      const id = queryId(req, key);
+      if (id) { where.push(`c.${key}=?`); params.push(id); }
+    }
+    const pipeline = queryId(req, 'pipeline_id');
+    if (pipeline) { where.push('(c.to_pipeline_id=? OR c.from_pipeline_id=?)'); params.push(pipeline, pipeline); }
+    const stage = queryId(req, 'to_stage_id');
+    if (stage) { where.push('c.to_stage_id=?'); params.push(stage); }
+    for (const [key, op] of [['created_since', '>='], ['changed_since', '>='], ['changed_before', '<']]) {
+      const time = timestamp(req.query[key], key);
+      if (time) { where.push(`c.changed_at${op}?`); params.push(time); }
+    }
+    await listPage(req, res, {sql: `SELECT c.id,c.deal_id,c.from_stage_id,c.from_pipeline_id,c.to_stage_id,c.to_pipeline_id,c.user_id,c.api_key_id,c.changed_at FROM deal_stage_changes c WHERE ${where.join(' AND ')}`, params, alias: 'c'},
+      async rows => rows.map(row => ({...row, changed_by: row.user_id ? {type: 'user', id: row.user_id} : row.api_key_id ? {type: 'api_key', id: row.api_key_id} : null})));
+  }));
+
+  // ---------- notes of all records of one type ----------
+  const noteSources = {
+    deal: {scope: 'deals:read', sql: "SELECT n.id,'deal' entity_type,n.deal_id entity_id,n.body,n.pinned,n.user_id,n.created_at,n.updated_at FROM notes n JOIN deals e ON e.id=n.deal_id WHERE TRUE", entity: 'n.deal_id'},
+    contact: {scope: 'contacts:read', sql: "SELECT n.id,n.entity_type,n.entity_id,n.body,n.user_id,n.created_at,n.updated_at FROM entity_notes n WHERE n.entity_type='contact'", entity: 'n.entity_id'},
+    company: {scope: 'companies:read', sql: "SELECT n.id,n.entity_type,n.entity_id,n.body,n.user_id,n.created_at,n.updated_at FROM entity_notes n WHERE n.entity_type='company'", entity: 'n.entity_id'}
+  };
+  app.get('/api/v1/notes', apiKey('deals:read', 'contacts:read', 'companies:read'), route(async (req, res) => {
+    const type = queryText(req, 'entity_type', 20), source = noteSources[type];
+    if (!source) bad('entity_type: deal, contact или company');
+    if (!req.apiKey.scopes.includes(source.scope)) throw new ApiError(403, `У ключа нет нужного права: ${source.scope}`);
+    const where = [], params = [];
+    const entity = queryId(req, 'entity_id');
+    if (entity) { where.push(`${source.entity}=?`); params.push(entity); }
+    syncFilters(req, 'n', where, params);
+    await listPage(req, res, {sql: `${source.sql}${where.map(item => ` AND ${item}`).join('')}`, params, alias: 'n'}, async rows => rows.map(noteView));
   }));
 
   // ---------- pipelines, stages and transition rules ----------
@@ -342,7 +407,7 @@ export function registerApiV1(app, db, helpers) {
   }));
 
   // ---------- deals ----------
-  const dealColumns = 'd.id,d.name,d.stage_id,s.pipeline_id,s.kind stage_kind,d.owner_id,d.contact_id,d.company_id,d.amount,d.source,d.tags,d.description,d.loss_reason,d.created_at,d.updated_at';
+  const dealColumns = 'd.id,d.name,d.stage_id,s.pipeline_id,s.kind stage_kind,d.owner_id,d.contact_id,d.company_id,d.amount,d.source,d.tags,d.description,d.loss_reason,d.created_at,d.updated_at,d.closed_at,d.deleted_at';
   async function decorateDeals(rows) {
     if (!rows.length) return [];
     const ids = rows.map(row => row.id);
@@ -396,7 +461,8 @@ export function registerApiV1(app, db, helpers) {
   }
 
   app.get('/api/v1/deals', apiKey('deals:read'), route(async (req, res) => {
-    const where = ['d.deleted_at IS NULL'], params = [];
+    const where = ['TRUE'], params = [];
+    deletedFilter(req, 'd', where, params);
     for (const [key, column] of [['pipeline_id', 's.pipeline_id'], ['stage_id', 'd.stage_id'], ['owner_id', 'd.owner_id'], ['company_id', 'd.company_id']]) {
       const id = queryId(req, key);
       if (id) { where.push(`${column}=?`); params.push(id); }
@@ -407,6 +473,11 @@ export function registerApiV1(app, db, helpers) {
     if (kind) { if (!['active', 'won', 'lost'].includes(kind)) bad('stage_kind: active, won или lost'); where.push('s.kind=?'); params.push(kind); }
     const q = queryText(req, 'q');
     if (q) { where.push('contains_search(d.name,?)'); params.push(q); }
+    for (const [key, op] of [['closed_since', '>='], ['closed_before', '<']]) {
+      const time = timestamp(req.query[key], key);
+      if (time) { where.push(`d.closed_at IS NOT NULL AND d.closed_at${op}?`); params.push(time); }
+    }
+    await customFieldFilter(req, 'deal', 'd', where, params);
     syncFilters(req, 'd', where, params);
     await listPage(req, res, {sql: `SELECT ${dealColumns} FROM deals d JOIN stages s ON s.id=d.stage_id WHERE ${where.join(' AND ')}`, params, alias: 'd'}, decorateDeals);
   }));
@@ -538,7 +609,7 @@ export function registerApiV1(app, db, helpers) {
   app.get('/api/v1/deals/:id/notes', apiKey('deals:read'), route(async (req, res) => {
     const id = positiveId(req.params.id);
     await liveRow('deals', id);
-    res.json({items: (await db.prepare('SELECT id,deal_id,body,pinned,user_id,created_at FROM notes WHERE deal_id=? ORDER BY id DESC LIMIT 500').all(id)).map(noteView)});
+    res.json({items: (await db.prepare('SELECT id,deal_id,body,pinned,user_id,created_at,updated_at FROM notes WHERE deal_id=? ORDER BY id DESC LIMIT 500').all(id)).map(noteView)});
   }));
   app.post('/api/v1/deals/:id/notes', apiKey('deals:write'), route(async (req, res) => {
     const id = positiveId(req.params.id), body = objectBody(req);
@@ -550,24 +621,24 @@ export function registerApiV1(app, db, helpers) {
       await event(id, userId, `Добавлена заметка ${via(req)}`);
       return created.lastInsertRowid;
     })();
-    res.status(201).json(noteView(await db.prepare('SELECT id,deal_id,body,pinned,user_id,created_at FROM notes WHERE id=?').get(noteId)));
+    res.status(201).json(noteView(await db.prepare('SELECT id,deal_id,body,pinned,user_id,created_at,updated_at FROM notes WHERE id=?').get(noteId)));
   }));
   app.patch('/api/v1/deals/:id/notes/:noteId', apiKey('deals:write'), route(async (req, res) => {
     const id = positiveId(req.params.id), noteId = positiveId(req.params.noteId), body = objectBody(req), pinned = flag(body, 'pinned');
     if (pinned === undefined) bad('Передайте pinned: true или false');
     const result = await db.prepare('UPDATE notes SET pinned=? WHERE id=? AND deal_id=?').run(pinned ? 1 : 0, noteId, id);
     if (!result.changes) throw new ApiError(404, 'Примечание не найдено');
-    res.json(noteView(await db.prepare('SELECT id,deal_id,body,pinned,user_id,created_at FROM notes WHERE id=?').get(noteId)));
+    res.json(noteView(await db.prepare('SELECT id,deal_id,body,pinned,user_id,created_at,updated_at FROM notes WHERE id=?').get(noteId)));
   }));
 
   // ---------- contacts and companies ----------
   const entities = {
     contact: {table: 'contacts', path: 'contacts', scope: 'contacts', label: 'Контакт', created: 'Контакт создан',
-      fields: [['name', 255], ['phone', 80], ['email', 254], ['position', 255], ['notes', 5000]], refs: [['company_id', 'companies', 'Компания']],
-      columns: 'x.id,x.name,x.company_id,x.owner_id,x.phone,x.email,x.position,x.notes,x.tags,x.created_at,x.updated_at'},
+      fields: [['name', 255], ['phone', 80], ['email', 254], ['telegram', 120], ['position', 255], ['notes', 5000]], refs: [['company_id', 'companies', 'Компания']],
+      columns: 'x.id,x.name,x.company_id,x.owner_id,x.phone,x.email,x.telegram,x.position,x.notes,x.tags,x.created_at,x.updated_at,x.deleted_at'},
     company: {table: 'companies', path: 'companies', scope: 'companies', label: 'Компания', created: 'Компания создана',
       fields: [['name', 255], ['phone', 80], ['email', 254], ['website', 255], ['address', 500], ['notes', 5000]], refs: [],
-      columns: 'x.id,x.name,x.owner_id,x.phone,x.email,x.website,x.address,x.notes,x.tags,x.created_at,x.updated_at'}
+      columns: 'x.id,x.name,x.owner_id,x.phone,x.email,x.website,x.address,x.notes,x.tags,x.created_at,x.updated_at,x.deleted_at'}
   };
   for (const [type, spec] of Object.entries(entities)) {
     const read = apiKey(`${spec.scope}:read`), write = apiKey(`${spec.scope}:write`);
@@ -576,7 +647,8 @@ export function registerApiV1(app, db, helpers) {
     const columns = ['owner_id', ...spec.refs.map(([key]) => key), ...spec.fields.map(([key]) => key), 'tags'];
 
     app.get(`/api/v1/${spec.path}`, read, route(async (req, res) => {
-      const where = ['x.deleted_at IS NULL'], params = [];
+      const where = ['TRUE'], params = [];
+      deletedFilter(req, 'x', where, params);
       for (const key of ['owner_id', ...spec.refs.map(([key]) => key)]) {
         const id = queryId(req, key);
         if (id) { where.push(`x.${key}=?`); params.push(id); }
@@ -591,6 +663,12 @@ export function registerApiV1(app, db, helpers) {
         if (digits.length < 5) bad('phone: нужно хотя бы 5 цифр');
         where.push("strpos(regexp_replace(x.phone,'[^0-9]','','g'),?)>0"); params.push(digits.slice(-10));
       }
+      const telegram = queryText(req, 'telegram', 120);
+      if (telegram) {
+        if (type !== 'contact') bad('Фильтр telegram есть только у контактов');
+        where.push("x.telegram<>'' AND normalize_telegram(x.telegram)=normalize_telegram(?)"); params.push(telegram);
+      }
+      await customFieldFilter(req, type, 'x', where, params);
       const tag = queryText(req, 'tag', 120);
       if (tag) { where.push('has_entity_tag(x.tags,?)'); params.push(tag); }
       syncFilters(req, 'x', where, params);
@@ -646,7 +724,7 @@ export function registerApiV1(app, db, helpers) {
     app.get(`/api/v1/${spec.path}/:id/notes`, read, route(async (req, res) => {
       const id = positiveId(req.params.id);
       await liveRow(spec.table, id);
-      res.json({items: await db.prepare('SELECT id,entity_type,entity_id,body,user_id,created_at FROM entity_notes WHERE entity_type=? AND entity_id=? ORDER BY id DESC LIMIT 500').all(type, id)});
+      res.json({items: await db.prepare('SELECT id,entity_type,entity_id,body,user_id,created_at,updated_at FROM entity_notes WHERE entity_type=? AND entity_id=? ORDER BY id DESC LIMIT 500').all(type, id)});
     }));
     app.post(`/api/v1/${spec.path}/:id/notes`, write, route(async (req, res) => {
       const id = positiveId(req.params.id), body = objectBody(req);
@@ -654,17 +732,19 @@ export function registerApiV1(app, db, helpers) {
       const content = text(body, 'body', 10000, {required: true}), userId = idField(body, 'user_id') ?? null;
       await ensureRef('users', userId, 'Пользователь');
       const created = await db.prepare('INSERT INTO entity_notes (entity_type,entity_id,user_id,body) VALUES (?,?,?,?)').run(type, id, userId, content);
-      res.status(201).json(await db.prepare('SELECT id,entity_type,entity_id,body,user_id,created_at FROM entity_notes WHERE id=?').get(created.lastInsertRowid));
+      res.status(201).json(await db.prepare('SELECT id,entity_type,entity_id,body,user_id,created_at,updated_at FROM entity_notes WHERE id=?').get(created.lastInsertRowid));
     }));
   }
 
   // ---------- tasks ----------
-  const taskColumns = 't.id,t.title,t.task_type,t.due_at,t.duration_minutes,t.all_day,t.completed_at,t.completion_result,t.deal_id,t.contact_id,t.company_id,t.owner_id,t.created_at,t.updated_at';
+  const taskColumns = 't.id,t.title,t.task_type,t.due_at,t.duration_minutes,t.all_day,t.completed_at,t.completion_result,t.deal_id,t.contact_id,t.company_id,t.owner_id,t.created_at,t.updated_at,t.deleted_at';
   const taskView = row => ({...row, all_day: !!row.all_day, completed: !!row.completed_at});
-  const taskFrom = 'FROM tasks t LEFT JOIN deals d ON d.id=t.deal_id WHERE t.deleted_at IS NULL AND (t.deal_id IS NULL OR d.deleted_at IS NULL)';
+  const taskLive = 't.deleted_at IS NULL AND (t.deal_id IS NULL OR d.deleted_at IS NULL)';
+  const taskFrom = `FROM tasks t LEFT JOIN deals d ON d.id=t.deal_id WHERE ${taskLive}`;
   const getTask = async id => { const row = await db.prepare(`SELECT ${taskColumns} ${taskFrom} AND t.id=?`).get(id); return row && taskView(row); };
   app.get('/api/v1/tasks', apiKey('tasks:read'), route(async (req, res) => {
     const where = [], params = [];
+    deletedFilter(req, 't', where, params, taskLive);
     for (const key of ['deal_id', 'contact_id', 'company_id', 'owner_id']) {
       const id = queryId(req, key);
       if (id) { where.push(`t.${key}=?`); params.push(id); }
@@ -681,7 +761,9 @@ export function registerApiV1(app, db, helpers) {
       where.push(`t.due_at IS NOT NULL AND t.due_at${op}?`); params.push(new Date(parsed).toISOString());
     }
     syncFilters(req, 't', where, params);
-    await listPage(req, res, {sql: `SELECT ${taskColumns} ${taskFrom}${where.length ? ` AND ${where.join(' AND ')}` : ''}`, params, alias: 't'}, async rows => rows.map(taskView));
+    const typeFilter = queryText(req, 'task_type', 50);
+    if (typeFilter) { where.push('t.task_type=?'); params.push(typeFilter); }
+    await listPage(req, res, {sql: `SELECT ${taskColumns} FROM tasks t LEFT JOIN deals d ON d.id=t.deal_id WHERE TRUE${where.map(item => ` AND ${item}`).join('')}`, params, alias: 't'}, async rows => rows.map(taskView));
   }));
   app.get('/api/v1/tasks/:id', apiKey('tasks:read'), route(async (req, res) => {
     const task = await getTask(positiveId(req.params.id));

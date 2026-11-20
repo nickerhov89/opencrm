@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — data for reports and the amoCRM move
+
+- Stage history as data: every deal creation and stage change is a row in `deal_stage_changes` with the stage and pipeline before and after, who made it (employee or API key) and when; `GET /api/v1/stage-changes` lists it for all deals.
+- Deals have `closed_at`, set on entering a won or lost stage and cleared on return to work; `closed_since`/`closed_before` filters.
+- Lists can include records in the trash (`include_deleted=1`) or only recently trashed ones (`deleted_since`); every record has `deleted_at`, and moving to the trash updates `updated_at`.
+- `GET /api/v1/notes` lists notes of all deals, contacts or companies; notes have `updated_at`.
+- Contacts have a Telegram field (in the card and the API) with lookup that ignores `@`, `t.me/` and case; lists filter by custom field values with `custom_field[<id>]=`.
+- `GET /api/v1/task-types`; preset task types are shared between the interface and the API.
+- Deal webhooks carry `changed_by`.
+- `node scripts/admin.mjs sync-ids` (also run on every start) moves ID sequences past rows loaded with explicit IDs; docs/AMOCRM_IMPORT.md describes a load from amoCRM that keeps the original IDs.
+
 ## Unreleased — full API v1
 
 - API v1 covers deals, contacts, companies, tasks, notes, calls, employees, custom fields and pipelines: list with filters, cursor pagination and `updated_since` sync, read, create (with `Idempotency-Key`), update, and move to the trash. New key scopes: `contacts:*`, `companies:*`, `tasks:*`, `users:read`, `pipelines:write`, `fields:write`; `deals:write` now covers creating, updating and deleting deals, not only changing the stage. See docs/INTEGRATIONS.md.

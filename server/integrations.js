@@ -110,7 +110,7 @@ export function registerIntegrations(app, db, {auth, admin, audit = () => {}, ..
       if (anyOf.length && !anyOf.some(scope => granted.includes(scope))) return fail(res, 403, `У ключа нет нужного права: ${anyOf.join(' или ')}`);
       await db.prepare('UPDATE api_keys SET last_used_at=CURRENT_TIMESTAMP WHERE id=?').run(key.id);
       req.apiKey = {id: key.id, name: key.name, scopes: granted};
-      next();
+      db.runAs(`api_key:${key.id}`, next);
     };
   }
 
