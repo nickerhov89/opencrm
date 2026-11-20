@@ -134,6 +134,13 @@ export function createDb(path = process.env.DATABASE_PATH || './data/opencrm.db'
   if(!userColumns.includes('password_changed_at'))db.exec('ALTER TABLE users ADD COLUMN password_changed_at TEXT');
   if(!db.prepare('PRAGMA table_info(sessions)').all().some(column=>column.name==='created_at'))db.exec('ALTER TABLE sessions ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0');
   db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)');
+  db.exec('CREATE TABLE IF NOT EXISTS trusted_devices (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_trusted_devices_user ON trusted_devices(user_id)');
+  // Name/email lookups used by CSV import and inbox lead matching.
+  db.exec('CREATE INDEX IF NOT EXISTS idx_companies_lower_name ON companies(lower(name))');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_contacts_lower_name ON contacts(lower(name))');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_contacts_lower_email ON contacts(lower(email))');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone)');
   db.exec("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE SET NULL, actor TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, target TEXT NOT NULL DEFAULT '', details TEXT NOT NULL DEFAULT '', ip TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
   db.exec('CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at,id)');
   // Permissions used to be "allowed unless explicitly denied". They are now checked as

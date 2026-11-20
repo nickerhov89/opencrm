@@ -27,6 +27,9 @@ test('login limiter separates IPs and accounts',()=>{
   assert.ok(limiter.blocked('1.1.1.1','c@x')>0,'password spraying from one IP is blocked');
   for(let i=0;i<8;i++)limiter.fail(`10.0.0.${i}`,'victim@x');
   assert.ok(limiter.blocked('9.9.9.9','victim@x')>0,'distributed guessing against one account is capped');
+  assert.equal(limiter.blocked('9.9.9.9','victim@x',{trusted:true}),0,'a browser that signed in before is not locked out by the account cap');
+  for(let i=0;i<3;i++)limiter.fail('8.8.8.8','victim@x');
+  assert.ok(limiter.blocked('8.8.8.8','victim@x',{trusted:true})>0,'per IP+account limit still applies to trusted devices');
 });
 
 test('permission normalization fills gaps from the given base',()=>{
@@ -59,6 +62,7 @@ test('account lifecycle, 2FA, default rights, audit log, quotas and purge',async
   process.env.UPLOAD_DIR=join(folder,'uploads');
   process.env.NODE_ENV='test';
   process.env.ATTACHMENT_USER_QUOTA_MB='0.001';
+  process.env.TRUST_PROXY='loopback';
   const {app,db}=await import('../server/index.js');
   const server=app.listen(0,'127.0.0.1');
   await new Promise(resolve=>server.once('listening',resolve));
@@ -159,6 +163,52 @@ test('account lifecycle, 2FA, default rights, audit log, quotas and purge',async
     assert.equal(db.prepare("SELECT COUNT(*) n FROM entity_activity WHERE entity_type='contact' AND entity_id=?").get(contact.data.id).n,0);
     assert.equal(db.prepare('SELECT COUNT(*) n FROM attachments').get().n,0);
     assert.ok(!existsSync(join(process.env.UPLOAD_DIR,files[0])));
+
+    // Cross-site writes are rejected whatever the case of the path ('/API/...' used to slip through).
+    const root=base.slice(0,-4);
+    const upper=await fetch(`${root}/API/users/${created.data.id}/disable`,{method:'POST',headers:{Cookie:admin,Origin:'https://evil.example','Content-Type':'application/x-www-form-urlencoded'},body:'x=1'});
+    assert.equal(upper.status,403);
+    assert.equal(db.prepare('SELECT disabled_at FROM users WHERE id=?').get(created.data.id).disabled_at,null);
+    assert.equal((await fetch(`${root}/API/me`,{headers:{Cookie:admin}})).status,404,'API routes are case-sensitive');
+
+    // Accepting a lead never links (or reveals) contacts and companies the employee cannot see.
+    const scopedRights={create:true,edit:true,delete:false,export:false};
+    await call('/users',{method:'POST',cookie:admin,body:{name:'Scoped',email:'scoped@example.test',password:'scoped-password',role:'member',deal_access:'own',contact_access:'own',company_access:'own',permissions:{deal:scopedRights,contact:scopedRights,company:scopedRights}}});
+    const scoped=(await login('scoped@example.test','scoped-password')).cookie;
+    const hiddenCompany=(await call('/companies',{method:'POST',cookie:admin,body:{name:'Hidden Corp'}})).data.id;
+    const hiddenContact=(await call('/contacts',{method:'POST',cookie:admin,body:{name:'Hidden Person',email:'hidden@corp.test',company_id:hiddenCompany}})).data.id;
+    const probeLead=(await call('/inbox',{method:'POST',cookie:scoped,body:{pipeline_id:pipeline.id,title:'Probe',email:'HIDDEN@corp.test',company_name:'hidden corp'}})).data.id;
+    const accepted=await call(`/inbox/${probeLead}/accept`,{method:'POST',cookie:scoped,body:{stage_id:(await call('/stages?pipeline_id='+pipeline.id,{cookie:admin})).data[0].id}});
+    assert.equal(accepted.status,200);
+    const acceptedDeal=db.prepare('SELECT contact_id,company_id FROM deals WHERE id=?').get(accepted.data.deal_id);
+    assert.notEqual(acceptedDeal.contact_id,hiddenContact);
+    assert.notEqual(acceptedDeal.company_id,hiddenCompany);
+    assert.ok(!JSON.stringify((await call('/deals/'+accepted.data.deal_id,{cookie:scoped})).data).includes('Hidden'));
+
+    // CSV import size is capped.
+    process.env.IMPORT_MAX_ROWS='3';
+    assert.equal((await call('/import/companies.csv',{method:'POST',cookie:admin,body:{csv:['name','a','b','c','d'].join('\n')}})).status,413);
+    assert.equal((await call('/import/companies.csv',{method:'POST',cookie:admin,body:{csv:['name','a','b','c'].join('\n')}})).data.imported,3);
+    delete process.env.IMPORT_MAX_ROWS;
+
+    // Failing logins from many addresses cannot lock the owner out of a browser they signed in from before.
+    await call('/users',{method:'POST',cookie:admin,body:{name:'Victim',email:'victim@example.test',password:'victim-password',role:'member'}});
+    const loginFrom=(ip,password,extra={})=>fetch(base+'/login',{method:'POST',headers:{'Content-Type':'application/json','X-Forwarded-For':ip,...extra},body:JSON.stringify({email:'victim@example.test',password})});
+    const first=await loginFrom('198.51.100.1','victim-password');
+    assert.equal(first.status,200);
+    const device=first.headers.getSetCookie().find(item=>item.startsWith('opencrm_device='))?.split(';')[0];
+    assert.ok(device,'a trusted-device cookie is issued on sign-in');
+    for(let ipIndex=0;ipIndex<5;ipIndex++)for(let attempt=0;attempt<10;attempt++)assert.equal((await loginFrom(`203.0.113.${ipIndex+10}`,'guess-'+attempt)).status,401);
+    assert.equal((await loginFrom('198.51.100.9','victim-password')).status,429,'a new browser is still held back while the account is under attack');
+    assert.equal((await loginFrom('198.51.100.9','victim-password',{Cookie:device})).status,200,'the owner signs in from their known browser');
+
+    // Contact list presets stay fast on large data (they used to be quadratic and block the server).
+    db.transaction(()=>{const contactRow=db.prepare('INSERT INTO contacts (name,owner_id) VALUES (?,1)'),companyRow=db.prepare('INSERT INTO companies (name,owner_id) VALUES (?,1)'),dealRow=db.prepare('INSERT INTO deals (name,stage_id,contact_id,company_id,owner_id) VALUES (?,1,?,?,1)'),taskRow=db.prepare('INSERT INTO tasks (title,deal_id,owner_id) VALUES (?,?,1)');for(let i=0;i<5000;i++){const c=contactRow.run('Bulk contact '+i).lastInsertRowid,co=companyRow.run('Bulk company '+i).lastInsertRowid,d=dealRow.run('Bulk deal '+i,c,co).lastInsertRowid;if(i%2)taskRow.run('Bulk task '+i,d)}})();
+    for(const preset of ['no_tasks','overdue','no_deals']){
+      const started=Date.now(),list=await call(`/entity-list?kind=all&page_size=25&preset=${preset}`,{cookie:admin});
+      assert.equal(list.status,200);
+      assert.ok(Date.now()-started<1500,`${preset} took ${Date.now()-started} ms`);
+    }
 
     // Everything above left a trail in the audit log, visible to admins only.
     assert.equal((await call('/audit-log',{cookie:manager})).status,403);

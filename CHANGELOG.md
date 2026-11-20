@@ -11,6 +11,7 @@
 - Rejecting or restoring inbox leads requires the right to create deals; admins can delete leads permanently.
 - Attachment storage quotas, and permanent deletion from the trash including history and files.
 - Updated `body-parser` and `qs` to fix known denial-of-service advisories.
+- Second audit fixes: contact-list presets no longer run a quadratic query that could block the server; CSV imports are capped at `IMPORT_MAX_ROWS` (5000) with indexed name lookups; cross-site checks cover every state-changing request and API routes are case-sensitive (`/API/...` bypassed the check); accepting an inbox lead only matches contacts and companies the employee can see; a browser that signed in before is not locked out when someone fails logins for that account from many addresses.
 
 ## 0.2.1 — 2026-10-13
 

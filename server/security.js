@@ -36,8 +36,9 @@ export const securityHeaders = (res, { https = false } = {}) => {
   if (https) res.set('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
 };
 
-// --- Login throttling: per IP, per account+IP and per account, so one address cannot
-// spray passwords across accounts and one attacker cannot lock a colleague out from elsewhere.
+// --- Login throttling: per IP, per account+IP and per account. The per-account cap stops distributed
+// guessing, but it is skipped for a browser that has already signed in to that account successfully
+// (a "trusted device" cookie), so attackers cannot lock the real owner out by failing on purpose.
 export function createLoginLimiter({ windowMs = 15 * 60 * 1000, perIp = 30, perAccountIp = 10, perAccount = 50, maxEntries = 20000 } = {}) {
   const buckets = new Map();
   const now = () => Date.now();
@@ -49,9 +50,12 @@ export function createLoginLimiter({ windowMs = 15 * 60 * 1000, perIp = 30, perA
   };
   const keys = (ip, account) => [[`ip:${ip}`, perIp], [`pair:${ip}:${account}`, perAccountIp], [`acct:${account}`, perAccount]];
   return {
-    blocked(ip, account) {
+    blocked(ip, account, { trusted = false } = {}) {
       let retry = 0;
-      for (const [key, limit] of keys(ip, account)) { const item = read(key); if (item && item.count >= limit) retry = Math.max(retry, item.until - now()); }
+      for (const [key, limit] of keys(ip, account)) {
+        if (trusted && key.startsWith('acct:')) continue;
+        const item = read(key); if (item && item.count >= limit) retry = Math.max(retry, item.until - now());
+      }
       return retry > 0 ? Math.ceil(retry / 1000) : 0;
     },
     fail(ip, account) {
