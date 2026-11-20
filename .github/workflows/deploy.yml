@@ -38,7 +38,9 @@ jobs:
         run: |
           if [ -z "$DEPLOY_KEY" ]; then echo "::error::Secret OPENCRM_DEPLOY_KEY is not set"; exit 1; fi
           install -m 700 -d ~/.ssh
-          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          # The secret may have been saved with Windows line endings, which OpenSSH cannot read.
+          printf '%s\n' "$DEPLOY_KEY" | tr -d '\r' > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null || { echo "::error::OPENCRM_DEPLOY_KEY is not a valid private key"; exit 1; }
           echo "$DEPLOY_HOST $DEPLOY_HOST_KEY" > ~/.ssh/known_hosts
           mkdir -p release && git archive HEAD | tar -x -C release && echo "$GITHUB_SHA" > release/.revision
           tar -czf - -C release . | ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 root@"$DEPLOY_HOST"
