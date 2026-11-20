@@ -2,6 +2,9 @@
 
 ## Unreleased — data for reports and the amoCRM move
 
+- Tasks have a `description` (up to 5000 characters) next to the 500-character title, in the task window, the deal timeline, the task board and the API.
+- Custom field values may be up to 5000 characters (was 1000).
+- docs/AMOCRM_IMPORT.md: amoCRM field type mapping, the «Неразобранное» stage, 142/143 and deleted stages in the stage history.
 - Stage history as data: every deal creation and stage change is a row in `deal_stage_changes` with the stage and pipeline before and after, who made it (employee or API key) and when; `GET /api/v1/stage-changes` lists it for all deals.
 - Deals have `closed_at`, set on entering a won or lost stage and cleared on return to work; `closed_since`/`closed_before` filters.
 - Lists can include records in the trash (`include_deleted=1`) or only recently trashed ones (`deleted_since`); every record has `deleted_at`, and moving to the trash updates `updated_at`.

@@ -119,7 +119,7 @@ export function registerApiV1(app, db, helpers) {
       for (const [rawId, value] of pairs) {
         const id = positiveId(rawId), field = id && await db.prepare('SELECT id FROM custom_fields WHERE id=? AND entity_type=?').get(id, type);
         if (!field) bad(`custom_field[${rawId}]: поле не найдено для этого типа записей`);
-        if (typeof value !== 'string' || value.length > 1000) bad(`custom_field[${rawId}]: строка до 1000 символов`);
+        if (typeof value !== 'string' || value.length > 5000) bad(`custom_field[${rawId}]: строка до 5000 символов`);
         where.push(`EXISTS(SELECT 1 FROM custom_field_values cv WHERE cv.field_id=? AND cv.entity_id=${alias}.id AND lower(cv.value)=lower(?))`);
         params.push(id, value.trim());
       }
@@ -167,7 +167,7 @@ export function registerApiV1(app, db, helpers) {
       if (!field) bad(`Поле ${rawId} не найдено для этого типа записей`);
       if (rawValue != null && !['string', 'number'].includes(typeof rawValue)) bad(`Поле «${field.name}»: значение должно быть строкой или числом`);
       const value = rawValue == null ? '' : String(rawValue).trim();
-      if (value.length > 1000) bad(`Поле «${field.name}»: не длиннее 1000 символов`);
+      if (value.length > 5000) bad(`Поле «${field.name}»: не длиннее 5000 символов`);
       const error = customValueError(field, value);
       if (error) bad(`Поле «${field.name}»: ${error}`);
       result.push({field, value});
@@ -737,7 +737,7 @@ export function registerApiV1(app, db, helpers) {
   }
 
   // ---------- tasks ----------
-  const taskColumns = 't.id,t.title,t.task_type,t.due_at,t.duration_minutes,t.all_day,t.completed_at,t.completion_result,t.deal_id,t.contact_id,t.company_id,t.owner_id,t.created_at,t.updated_at,t.deleted_at';
+  const taskColumns = 't.id,t.title,t.description,t.task_type,t.due_at,t.duration_minutes,t.all_day,t.completed_at,t.completion_result,t.deal_id,t.contact_id,t.company_id,t.owner_id,t.created_at,t.updated_at,t.deleted_at';
   const taskView = row => ({...row, all_day: !!row.all_day, completed: !!row.completed_at});
   const taskLive = 't.deleted_at IS NULL AND (t.deal_id IS NULL OR d.deleted_at IS NULL)';
   const taskFrom = `FROM tasks t LEFT JOIN deals d ON d.id=t.deal_id WHERE ${taskLive}`;
@@ -791,12 +791,12 @@ export function registerApiV1(app, db, helpers) {
       all_day: has(body, 'all_day') ? body.all_day : old ? old.all_day : false
     });
     if (!schedule) bad('Проверьте срок: due_at в ISO 8601, duration_minutes 0–1440 и только вместе с due_at, all_day — только вместе с due_at');
-    return {title: text(body, 'title', 500, {required: !old || has(body, 'title')}) ?? old.title, task_type: text(body, 'task_type', 50) || (old ? old.task_type : 'Связаться'), owner_id: owner, ...links, ...schedule};
+    return {title: text(body, 'title', 500, {required: !old || has(body, 'title')}) ?? old.title, description: text(body, 'description', 5000) ?? (old ? old.description : ''), task_type: text(body, 'task_type', 50) || (old ? old.task_type : 'Связаться'), owner_id: owner, ...links, ...schedule};
   }
   app.post('/api/v1/tasks', apiKey('tasks:write'), route(async (req, res) => {
     const body = objectBody(req), saved = await taskInput(body);
     const result = await idempotent(req, 'task', saved, async () => {
-      const created = await db.prepare('INSERT INTO tasks (title,task_type,due_at,duration_minutes,all_day,deal_id,contact_id,company_id,owner_id) VALUES (?,?,?,?,?,?,?,?,?)').run(saved.title, saved.task_type, saved.due_at, saved.duration_minutes, saved.all_day, saved.deal_id, saved.contact_id, saved.company_id, saved.owner_id);
+      const created = await db.prepare('INSERT INTO tasks (title,description,task_type,due_at,duration_minutes,all_day,deal_id,contact_id,company_id,owner_id) VALUES (?,?,?,?,?,?,?,?,?,?)').run(saved.title, saved.description, saved.task_type, saved.due_at, saved.duration_minutes, saved.all_day, saved.deal_id, saved.contact_id, saved.company_id, saved.owner_id);
       if (saved.deal_id) await event(saved.deal_id, null, `Задача создана ${via(req)}: ${saved.title}`.slice(0, 1000));
       return created.lastInsertRowid;
     });
@@ -810,7 +810,7 @@ export function registerApiV1(app, db, helpers) {
     const completedAt = completed === true ? old.completed_at || new Date().toISOString() : completed === false ? null : old.completed_at;
     const completionResult = completed === false ? '' : resultText ?? old.completion_result;
     await db.transaction(async () => {
-      await db.prepare('UPDATE tasks SET title=?,task_type=?,due_at=?,duration_minutes=?,all_day=?,owner_id=?,deal_id=?,contact_id=?,company_id=?,completed_at=?,completion_result=? WHERE id=?').run(saved.title, saved.task_type, saved.due_at, saved.duration_minutes, saved.all_day, saved.owner_id, saved.deal_id, saved.contact_id, saved.company_id, completedAt, completionResult, id);
+      await db.prepare('UPDATE tasks SET title=?,description=?,task_type=?,due_at=?,duration_minutes=?,all_day=?,owner_id=?,deal_id=?,contact_id=?,company_id=?,completed_at=?,completion_result=? WHERE id=?').run(saved.title, saved.description, saved.task_type, saved.due_at, saved.duration_minutes, saved.all_day, saved.owner_id, saved.deal_id, saved.contact_id, saved.company_id, completedAt, completionResult, id);
       if (saved.deal_id && !old.completed_at && completedAt) await event(saved.deal_id, null, `Задача выполнена${completionResult ? `: ${completionResult}` : ''} ${via(req)}`.slice(0, 1000));
       if (saved.deal_id && old.completed_at && !completedAt) await event(saved.deal_id, null, `Задача возвращена в работу ${via(req)}`);
     })();

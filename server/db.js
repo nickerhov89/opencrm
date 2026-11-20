@@ -347,6 +347,7 @@ END $$;
 
 -- Contacts: Telegram username, matched without @, t.me/ and letter case.
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS telegram TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
 CREATE OR REPLACE FUNCTION normalize_telegram(value text) RETURNS text LANGUAGE sql IMMUTABLE AS $$
   SELECT lower(regexp_replace(btrim(COALESCE(value, '')), '^(https?://)?(www[.])?((t|telegram)[.]me/)?@?', ''))
 $$;

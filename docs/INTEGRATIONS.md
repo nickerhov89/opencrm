@@ -55,7 +55,7 @@ POST /api/v1/custom-fields
 {"entity_type": "contact", "name": "Segment", "field_type": "select", "options": ["A", "B"]}
 ```
 
-A select option that is in use cannot be removed. Records return non-empty values as `"custom_fields": [{"id": 3, "name": "Portal ID", "field_type": "text", "value": "42"}]`. To write values send `"custom_fields": {"3": "42", "5": "B"}` (or `[{"id": 3, "value": "42"}]`) in `POST`/`PATCH`; an empty string or `null` clears the value. Values are validated by field type.
+A select option that is in use cannot be removed. Records return non-empty values as `"custom_fields": [{"id": 3, "name": "Portal ID", "field_type": "text", "value": "42"}]`. To write values send `"custom_fields": {"3": "42", "5": "B"}` (or `[{"id": 3, "value": "42"}]`) in `POST`/`PATCH`; an empty string or `null` clears the value. Values are validated by field type and may be up to 5000 characters.
 
 ## Pipelines, stages and transition rules
 
@@ -165,13 +165,13 @@ DELETE /api/v1/tasks/:id
 
 ```json
 POST /api/v1/tasks
-{"title": "Call the client", "task_type": "Звонок", "deal_id": 123, "due_at": "2026-12-01T09:00:00Z", "duration_minutes": 30}
+{"title": "Call the client", "description": "Details and a link", "task_type": "Связаться", "deal_id": 123, "due_at": "2026-12-01T09:00:00Z", "duration_minutes": 30}
 
 PATCH /api/v1/tasks/55
 {"completed": true, "result": "Agreed on a meeting"}
 ```
 
-Fields: `title` (required), `task_type` (default `Связаться`; the preset names such as `Встреча` are stable, reports can rely on them), `due_at`, `duration_minutes` (0–1440, needs `due_at`), `all_day` (needs `due_at`), `owner_id`, and links: `deal_id` and/or `contact_id`, or `company_id` alone. Without `owner_id` the task goes to the owner of the linked record; if it has none, the request returns 400. `completed: true` closes the task with an optional `result`, `completed: false` reopens it. Tasks of deals are written to the deal history. A response also contains `completed`, `completed_at`, `completion_result`, `created_at`, `updated_at`.
+Fields: `title` (required, up to 500 characters), `description` (up to 5000), `task_type` (default `Связаться`; the preset names such as `Встреча` are stable, reports can rely on them), `due_at`, `duration_minutes` (0–1440, needs `due_at`), `all_day` (needs `due_at`), `owner_id`, and links: `deal_id` and/or `contact_id`, or `company_id` alone. Without `owner_id` the task goes to the owner of the linked record; if it has none, the request returns 400. `completed: true` closes the task with an optional `result`, `completed: false` reopens it. Tasks of deals are written to the deal history. A response also contains `completed`, `completed_at`, `completion_result`, `created_at`, `updated_at`.
 
 ## Notes of all records
 
