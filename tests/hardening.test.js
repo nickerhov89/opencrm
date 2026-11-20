@@ -62,7 +62,6 @@ test('account lifecycle, 2FA, default rights, audit log, quotas and purge',async
   process.env.UPLOAD_DIR=join(folder,'uploads');
   process.env.NODE_ENV='test';
   process.env.ATTACHMENT_USER_QUOTA_MB='0.001';
-  process.env.TRUST_PROXY='loopback';
   const {app,db}=await import('../server/index.js');
   const server=app.listen(0,'127.0.0.1');
   await new Promise(resolve=>server.once('listening',resolve));

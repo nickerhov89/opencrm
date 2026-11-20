@@ -17,15 +17,6 @@ export function normalizePermissions(input, base = noPermissions()) {
   });
 }
 
-export function parseTrustProxy(raw) {
-  if (raw == null || raw === '') return false;
-  const value = String(raw).trim();
-  if (value === 'true') return true;
-  if (value === 'false' || value === '0') return false;
-  if (/^\d+$/.test(value)) return Number(value);
-  return value.split(',').map(item => item.trim()).filter(Boolean);
-}
-
 export const securityHeaders = (res, { https = false } = {}) => {
   res.set('X-Content-Type-Options', 'nosniff');
   res.set('Referrer-Policy', 'strict-origin-when-cross-origin');

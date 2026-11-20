@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { createDb } from './db.js';
 import { parseCsv, quoteCsvCell } from './csv.js';
 import { registerIntegrations } from './integrations.js';
-import { permissionEntities, permissionActions, normalizePermissions, noPermissions, defaultMemberPermissions, parseTrustProxy, securityHeaders, createLoginLimiter, newTotpSecret, verifyTotp, otpauthUrl } from './security.js';
+import { permissionEntities, permissionActions, normalizePermissions, noPermissions, defaultMemberPermissions, securityHeaders, createLoginLimiter, newTotpSecret, verifyTotp, otpauthUrl } from './security.js';
 import {defaultDealCardFields,validDealCardFields} from '../src/deal-card-layout.js';
 
 const app = express();
@@ -17,7 +17,10 @@ const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const uploadDir = resolve(process.env.UPLOAD_DIR || resolve(root,'data/uploads'));
 mkdirSync(uploadDir,{recursive:true});
 app.disable('x-powered-by');
-app.set('trust proxy',parseTrustProxy(process.env.TRUST_PROXY));
+// X-Forwarded-For is honoured only when the request comes from a local or private-network address
+// (nginx on the same host, Docker bridge, LAN proxy). Clients connecting directly from the internet
+// cannot spoof their IP, and no configuration is needed behind a typical reverse proxy.
+app.set('trust proxy',['loopback','linklocal','uniquelocal']);
 // Routes must match exactly: with case-insensitive routing '/API/...' reached the handlers
 // while the cross-site check below (which looked for '/api/') let it through.
 app.set('case sensitive routing',true);

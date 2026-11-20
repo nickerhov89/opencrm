@@ -7,7 +7,7 @@
 - Permissions are now denied unless granted. New members can create and edit but not delete or export by default; existing members keep their previous effective rights.
 - Security log for sign-ins, failed attempts, user and permission changes, CSV import/export, file downloads, API keys, webhooks and permanent deletions.
 - Login throttling per IP, per IP and account, and per account; constant-time response for unknown emails; malformed cookies no longer cause server errors.
-- Content-Security-Policy, X-Frame-Options and related headers, HSTS with `COOKIE_SECURE=1`, and `TRUST_PROXY` for correct client IPs behind a proxy.
+- Content-Security-Policy, X-Frame-Options and related headers, HSTS with `COOKIE_SECURE=1`, and real client IPs behind a local or private-network reverse proxy without extra configuration.
 - Rejecting or restoring inbox leads requires the right to create deals; admins can delete leads permanently.
 - Attachment storage quotas, and permanent deletion from the trash including history and files.
 - Updated `body-parser` and `qs` to fix known denial-of-service advisories.
