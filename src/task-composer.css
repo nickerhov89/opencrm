@@ -18,3 +18,5 @@
 .task-composer-body textarea{display:block;width:100%;min-height:65px;resize:vertical;border:0;box-shadow:none!important;background:#fff;color:#374752;font-size:12px;padding:11px 0 4px}.task-composer-body textarea::placeholder{color:#adb6bc}
 .task-composer-actions{display:flex;align-items:center;gap:12px}.task-composer-actions button{border:0;background:none;color:#8c979f;font-size:11px;font-weight:700;padding:9px 3px}.task-composer-actions .task-composer-submit{background:#5c91e0;color:#fff;padding:9px 18px;border-radius:2px}.task-composer-actions .task-composer-submit:hover{background:#4e83cc}
 @media(max-width:760px){.task-composer{padding:14px}.task-composer-row{gap:3px}.task-composer-owner{max-width:125px}.task-composer-type{max-width:125px}}
+.task-composer-body textarea.task-composer-description{min-height:44px;padding-top:4px;border-top:1px dashed #e3e7ea!important;color:#5b6873}
+.timeline-task-description,.task-description{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.45;color:#5b6873}

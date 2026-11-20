@@ -123,7 +123,16 @@ test('API v1: deals, contacts, companies, tasks, notes, fields, pipelines and st
     assert.ok(history.some(line => line.startsWith('Этап изменён: Qualified')));
 
     // Tasks attached to the deal
-    const task = await call('/v1/tasks', {key, method: 'POST', body: {title: 'Call the client', deal_id: deal.id, due_at: '2026-12-01T09:00:00Z', duration_minutes: 30}, status: 201});
+    const longText = 'Описание задачи из портала. '.repeat(140).trim();
+    const task = await call('/v1/tasks', {key, method: 'POST', body: {title: 'Call the client', description: longText, deal_id: deal.id, due_at: '2026-12-01T09:00:00Z', duration_minutes: 30}, status: 201});
+    assert.equal(task.description, longText);
+    await call('/v1/tasks', {key, method: 'POST', body: {title: 'x'.repeat(501), deal_id: deal.id}, status: 400});
+    assert.equal((await call(`/v1/tasks/${task.id}`, {key, method: 'PATCH', body: {description: 'Short'}})).description, 'Short');
+    const cookies = await call('/v1/custom-fields', {key, method: 'POST', body: {entity_type: 'deal', name: 'COOKIES', field_type: 'text'}, status: 201});
+    const cookieValue = 'c'.repeat(1075);
+    assert.equal((await call(`/v1/deals/${deal.id}`, {key, method: 'PATCH', body: {custom_fields: {[cookies.id]: cookieValue}}})).custom_fields.find(field => field.id === cookies.id).value, cookieValue);
+    await call(`/custom-fields/${cookies.id}/values/${deal.id}`, {method: 'PUT', body: {value: cookieValue + 'd'}});
+    await call(`/v1/deals/${deal.id}`, {key, method: 'PATCH', body: {custom_fields: {[cookies.id]: 'c'.repeat(5001)}}, status: 400});
     assert.equal(task.owner_id, owner, 'owner defaults to the deal owner');
     assert.equal(task.due_at, '2026-12-01T09:00:00.000Z');
     await call('/v1/tasks', {key, method: 'POST', body: {title: 'Bad', company_id: company.id, deal_id: deal.id}, status: 400});
