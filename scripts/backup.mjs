@@ -4,12 +4,19 @@
 //   node scripts/backup.mjs restore <backup>    into an EMPTY database at DATABASE_URL and an absent UPLOAD_DIR
 //   node scripts/backup.mjs schedule [folder]   keeps running: a backup every BACKUP_INTERVAL_HOURS (24),
 //                                               the newest BACKUP_KEEP (14) are kept
+//   node scripts/backup.mjs upload <backup>     copies a backup to S3-compatible storage
+//   node scripts/backup.mjs remote-list         lists backups in that storage
+// With BACKUP_S3_BUCKET set, schedule also uploads every new backup with rclone to BACKUP_S3_ENDPOINT,
+// bucket BACKUP_S3_BUCKET, folder BACKUP_S3_PREFIX (default "opencrm"), keys BACKUP_S3_ACCESS_KEY_ID and
+// BACKUP_S3_SECRET_ACCESS_KEY (BACKUP_S3_REGION optional), and deletes remote copies older than
+// BACKUP_S3_KEEP_DAYS (30). BACKUP_S3_ENCRYPTION_PASSWORD encrypts files before upload: keep it outside
+// the server, without it the remote copies cannot be restored.
 // pg_dump and pg_restore must be installed (the Docker image has them); PG_BIN may point at their folder.
 import {spawn} from 'node:child_process';
 import {createHash,randomBytes} from 'node:crypto';
 import {createReadStream,existsSync} from 'node:fs';
 import {chmod,copyFile,lstat,mkdir,readFile,readdir,rm,stat,writeFile} from 'node:fs/promises';
-import {dirname,join,resolve} from 'node:path';
+import {basename,dirname,join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const root=resolve(fileURLToPath(new URL('..',import.meta.url)));
@@ -18,16 +25,17 @@ const defaults=()=>({databaseUrl:process.env.DATABASE_URL,uploads:resolve(proces
 const pathExists=async path=>{try{await lstat(path);return true}catch(error){if(error.code==='ENOENT')return false;throw error}};
 const tool=name=>process.env.PG_BIN?join(process.env.PG_BIN,name):name;
 
-function run(name,args,{databaseUrl}={}){
+function run(name,args,{databaseUrl,extraEnv={},input}={}){
   return new Promise((resolvePromise,reject)=>{
-    // The connection string goes through the environment so the password never shows up in `ps`.
-    const env={...process.env};
+    // Connection strings and keys go through the environment so they never show up in `ps`.
+    const env={...process.env,...extraEnv};
     if(databaseUrl){const url=new URL(databaseUrl);env.PGHOST=url.hostname;env.PGPORT=url.port||'5432';env.PGUSER=decodeURIComponent(url.username);env.PGPASSWORD=decodeURIComponent(url.password);env.PGDATABASE=decodeURIComponent(url.pathname.slice(1));}
-    const child=spawn(tool(name),args,{env,stdio:['ignore','pipe','pipe']});
+    const child=spawn(name==='rclone'?name:tool(name),args,{env,stdio:[input===undefined?'ignore':'pipe','pipe','pipe']});
+    if(input!==undefined)child.stdin.end(input);
     let output='',errors='';
     child.stdout.on('data',chunk=>{output+=chunk});
     child.stderr.on('data',chunk=>{errors+=chunk});
-    child.on('error',error=>reject(error.code==='ENOENT'?new Error(`Не найден ${name}. Установите клиент PostgreSQL или укажите PG_BIN`):error));
+    child.on('error',error=>reject(error.code==='ENOENT'?new Error(name==='rclone'?'Не найден rclone':`Не найден ${name}. Установите клиент PostgreSQL или укажите PG_BIN`):error));
     child.on('close',code=>code===0?resolvePromise(output):reject(new Error(`${name}: ${errors.trim()||`код ${code}`}`)));
   });
 }
@@ -110,6 +118,60 @@ export async function restoreBackup(folder,{databaseUrl,uploads}={}){
   return {uploads};
 }
 
+// Off-site copies in S3-compatible storage via rclone. rclone is configured only through
+// environment variables, so no credentials are written to disk.
+export const remoteConfigured=()=>!!process.env.BACKUP_S3_BUCKET;
+
+async function remote(){
+  const missing=['BACKUP_S3_ENDPOINT','BACKUP_S3_BUCKET','BACKUP_S3_ACCESS_KEY_ID','BACKUP_S3_SECRET_ACCESS_KEY'].filter(key=>!process.env[key]);
+  if(missing.length)throw new Error(`Для выгрузки в S3 не заданы: ${missing.join(', ')}`);
+  const prefix=(process.env.BACKUP_S3_PREFIX||'opencrm').replace(/^\/+|\/+$/g,'');
+  const env={
+    RCLONE_CONFIG_OPENCRMS3_TYPE:'s3',
+    RCLONE_CONFIG_OPENCRMS3_PROVIDER:'Other',
+    RCLONE_CONFIG_OPENCRMS3_ENDPOINT:process.env.BACKUP_S3_ENDPOINT,
+    RCLONE_CONFIG_OPENCRMS3_REGION:process.env.BACKUP_S3_REGION||'',
+    RCLONE_CONFIG_OPENCRMS3_ACCESS_KEY_ID:process.env.BACKUP_S3_ACCESS_KEY_ID,
+    RCLONE_CONFIG_OPENCRMS3_SECRET_ACCESS_KEY:process.env.BACKUP_S3_SECRET_ACCESS_KEY,
+    RCLONE_CONFIG_OPENCRMS3_NO_CHECK_BUCKET:'true'
+  };
+  let target=`opencrms3:${process.env.BACKUP_S3_BUCKET}/${prefix}/`;
+  if(process.env.BACKUP_S3_ENCRYPTION_PASSWORD){
+    const obscured=(await run('rclone',['obscure','-'],{input:process.env.BACKUP_S3_ENCRYPTION_PASSWORD})).trim();
+    Object.assign(env,{
+      RCLONE_CONFIG_OPENCRMCRYPT_TYPE:'crypt',
+      RCLONE_CONFIG_OPENCRMCRYPT_REMOTE:target,
+      RCLONE_CONFIG_OPENCRMCRYPT_PASSWORD:obscured,
+      RCLONE_CONFIG_OPENCRMCRYPT_FILENAME_ENCRYPTION:'off',
+      RCLONE_CONFIG_OPENCRMCRYPT_DIRECTORY_NAME_ENCRYPTION:'false'
+    });
+    target='opencrmcrypt:';
+  }
+  return {env,target};
+}
+
+export async function uploadBackup(folder){
+  const base=resolve(folder),name=basename(base);
+  await verifyBackup(base);
+  const {env,target}=await remote();
+  // --immutable refuses to replace an existing remote file with different contents.
+  await run('rclone',['copy',base,target+name,'--immutable','--retries','5','--low-level-retries','10'],{extraEnv:env});
+  // Compare what arrived with the local copy (encrypted remotes need --download to compare contents).
+  await run('rclone',['check',base,target+name,'--one-way',...(process.env.BACKUP_S3_ENCRYPTION_PASSWORD?['--download']:[])],{extraEnv:env});
+  return target+name;
+}
+
+export async function listRemote(){
+  const {env,target}=await remote();
+  return (await run('rclone',['lsf',target,'--dirs-only'],{extraEnv:env})).split('\n').filter(Boolean);
+}
+
+async function pruneRemote(){
+  const days=Math.max(1,Number(process.env.BACKUP_S3_KEEP_DAYS)||30);
+  const {env,target}=await remote();
+  await run('rclone',['delete',target,'--min-age',`${days}d`,'--rmdirs'],{extraEnv:env});
+}
+
 async function prune(destination,keep){
   const parent=resolve(destination);
   const backups=(await readdir(parent,{withFileTypes:true})).filter(entry=>entry.isDirectory()&&entry.name.startsWith('opencrm-')).map(entry=>entry.name).sort();
@@ -122,8 +184,13 @@ async function schedule(destination=join(root,'backups')){
   // The app creates the schema on its first start; give it time before the first copy.
   await new Promise(done=>setTimeout(done,5*60*1000));
   for(;;){
-    try{console.log(new Date().toISOString(),'Копия создана:',await createBackup({destination}));await prune(destination,keep)}
+    let folder=null;
+    try{folder=await createBackup({destination});console.log(new Date().toISOString(),'Копия создана:',folder);await prune(destination,keep)}
     catch(error){console.error(new Date().toISOString(),'Резервная копия не создана:',error.message)}
+    if(folder&&remoteConfigured()){
+      try{console.log(new Date().toISOString(),'Копия выгружена:',await uploadBackup(folder));await pruneRemote()}
+      catch(error){console.error(new Date().toISOString(),'Копия не выгружена в S3:',error.message)}
+    }
     await new Promise(done=>setTimeout(done,hours*3600*1000));
   }
 }
@@ -135,6 +202,8 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
     else if(action==='verify'){if(!path)throw new Error('Укажите каталог копии');console.log(await verifyBackup(path))}
     else if(action==='restore'){if(!path)throw new Error('Укажите каталог копии');console.log(await restoreBackup(path))}
     else if(action==='schedule')await schedule(path);
-    else throw new Error('Использование: backup.mjs create [каталог] | verify <копия> | restore <копия> | schedule [каталог]');
+    else if(action==='upload'){if(!path)throw new Error('Укажите каталог копии');console.log(await uploadBackup(path))}
+    else if(action==='remote-list')console.log((await listRemote()).join('\n')||'В хранилище копий нет');
+    else throw new Error('Использование: backup.mjs create [каталог] | verify <копия> | restore <копия> | schedule [каталог] | upload <копия> | remote-list');
   }catch(error){console.error(error.message);process.exitCode=1}
 }

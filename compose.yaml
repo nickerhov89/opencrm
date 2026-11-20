@@ -37,7 +37,8 @@ services:
       - opencrm_data:/app/data
     restart: unless-stopped
 
-  # Daily pg_dump + copy of attachments, the newest BACKUP_KEEP copies are kept.
+  # Daily pg_dump + copy of attachments; the newest BACKUP_KEEP copies stay on this host and,
+  # with BACKUP_S3_BUCKET set, every copy is also uploaded to S3-compatible storage.
   backup:
     image: opencrm:local
     depends_on:
@@ -48,6 +49,14 @@ services:
       DATABASE_URL: *database-url
       BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
       BACKUP_KEEP: ${BACKUP_KEEP:-14}
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION:-}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-opencrm}
+      BACKUP_S3_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID:-}
+      BACKUP_S3_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY:-}
+      BACKUP_S3_KEEP_DAYS: ${BACKUP_S3_KEEP_DAYS:-30}
+      BACKUP_S3_ENCRYPTION_PASSWORD: ${BACKUP_S3_ENCRYPTION_PASSWORD:-}
     volumes:
       - opencrm_data:/app/data:ro
       - opencrm_backups:/app/backups
