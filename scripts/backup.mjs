@@ -17,12 +17,43 @@
 import {spawn} from 'node:child_process';
 import {createHash,randomBytes} from 'node:crypto';
 import {createReadStream,existsSync} from 'node:fs';
-import {chmod,copyFile,lstat,mkdir,readFile,readdir,rm,stat,writeFile} from 'node:fs/promises';
+import {chmod,copyFile,lstat,mkdir,mkdtemp,readFile,readdir,rm,stat,writeFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
 import {basename,dirname,join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const root=resolve(fileURLToPath(new URL('..',import.meta.url)));
 const DUMP='database.dump';
+const README='RESTORE.txt';
+// Every copy carries its own restore instructions, so it is usable without this repository at hand.
+const restoreNotes=createdAt=>`Резервная копия OpenCRM от ${createdAt} (UTC).
+
+Состав:
+  database.dump  — полный дамп базы PostgreSQL (pg_dump, формат custom): все таблицы и данные,
+                   последовательности, функции и триггеры. Владелец и права не сохраняются,
+                   поэтому дамп восстанавливается в любую пустую базу под любым пользователем.
+  uploads/       — вложения (файлы сделок, контактов и компаний).
+  manifest.json  — размеры и SHA-256 всех файлов.
+
+Восстановление на сервере с OpenCRM (Docker Compose, каталог /opt/opencrm). Текущие данные не удаляются,
+а откладываются в сторону:
+  1. Остановите CRM и службу копий:
+       docker compose -p opencrm stop opencrm backup
+  2. Отложите текущую базу и создайте пустую:
+       docker compose -p opencrm exec db psql -U opencrm -d postgres -c "ALTER DATABASE opencrm RENAME TO opencrm_old_$(date +%Y%m%d%H%M)"
+       docker compose -p opencrm exec db createdb -U opencrm opencrm
+  3. Отложите текущие вложения:
+       docker compose -p opencrm run --rm --no-deps backup sh -c 'mv /app/data/uploads /app/data/uploads-old-$(date +%Y%m%d%H%M)'
+  4. Восстановите копию прямо из S3 (скачает, проверит контрольные суммы, база должна быть пустой):
+       docker compose -p opencrm run --rm backup node scripts/backup.mjs restore-s3 ИМЯ_КОПИИ
+     Без ИМЯ_КОПИИ берётся самая свежая. Список копий: ... node scripts/backup.mjs remote-list
+  5. Запустите всё обратно: docker compose -p opencrm up -d
+
+Без OpenCRM, только инструменты PostgreSQL 17+:
+  createdb имя_базы
+  pg_restore --no-owner --no-privileges --exit-on-error --single-transaction --dbname имя_базы database.dump
+  Вложения скопируйте в каталог UPLOAD_DIR приложения.
+`;
 const defaults=()=>({databaseUrl:process.env.DATABASE_URL,uploads:resolve(process.env.UPLOAD_DIR||join(root,'data/uploads'))});
 const pathExists=async path=>{try{await lstat(path);return true}catch(error){if(error.code==='ENOENT')return false;throw error}};
 const tool=name=>process.env.PG_BIN?join(process.env.PG_BIN,name):name;
@@ -74,7 +105,7 @@ export async function verifyBackup(folder){
   const base=resolve(folder),manifest=JSON.parse(await readFile(join(base,'manifest.json'),'utf8'));
   if(manifest.version!==2||!Array.isArray(manifest.files))throw new Error('Неподдерживаемый формат резервной копии');
   const names=manifest.files.map(item=>item.path);
-  if(!names.includes(DUMP)||new Set(names).size!==names.length||names.some(name=>typeof name!=='string'||name!==DUMP&&(!name.startsWith('uploads/')||name.includes('\\')||name.split('/').some(part=>!part||part==='.'||part==='..'))))throw new Error('Некорректный список файлов резервной копии');
+  if(!names.includes(DUMP)||new Set(names).size!==names.length||names.some(name=>typeof name!=='string'||name!==DUMP&&name!==README&&(!name.startsWith('uploads/')||name.includes('\\')||name.split('/').some(part=>!part||part==='.'||part==='..'))))throw new Error('Некорректный список файлов резервной копии');
   const found=(await regularFiles(base)).filter(name=>name!=='manifest.json');
   if(JSON.stringify(found)!==JSON.stringify([...names].sort()))throw new Error('Состав резервной копии изменён');
   for(const item of manifest.files){
@@ -98,7 +129,9 @@ export async function createBackup({databaseUrl,uploads,destination=join(root,'b
     await run('pg_dump',['--format=custom','--no-owner','--no-privileges','--file',join(folder,DUMP)],{databaseUrl});
     await chmod(join(folder,DUMP),0o600);
     await copyDirectory(uploads,join(folder,'uploads'));
-    const manifest={version:2,createdAt:new Date().toISOString(),files:[]};
+    const createdAt=new Date().toISOString();
+    await writeFile(join(folder,README),restoreNotes(createdAt),{mode:0o600});
+    const manifest={version:2,createdAt,files:[]};
     for(const path of await regularFiles(folder))manifest.files.push({path,bytes:(await stat(join(folder,path))).size,sha256:await checksum(join(folder,path))});
     await writeFile(join(folder,'manifest.json'),JSON.stringify(manifest,null,2)+'\n',{mode:0o600});
     await verifyBackup(folder);
@@ -174,22 +207,67 @@ async function pruneRemote(){
   await run('rclone',['delete',target,'--min-age',`${days}d`,'--rmdirs'],{extraEnv:env});
 }
 
-async function prune(destination,keep){
+async function localBackups(destination){
   const parent=resolve(destination);
-  const backups=(await readdir(parent,{withFileTypes:true})).filter(entry=>entry.isDirectory()&&entry.name.startsWith('opencrm-')).map(entry=>entry.name).sort();
-  for(const name of backups.slice(0,Math.max(0,backups.length-keep)))await rm(join(parent,name),{recursive:true,force:true});
+  if(!await pathExists(parent))return [];
+  return (await readdir(parent,{withFileTypes:true})).filter(entry=>entry.isDirectory()&&entry.name.startsWith('opencrm-')).map(entry=>entry.name).sort();
 }
 
-// One full cycle: local copy, local retention, then the off-site copy. Returns false if anything failed.
-export async function backupCycle(destination=join(root,'backups')){
-  const keep=Math.max(1,Number(process.env.BACKUP_KEEP)||14);
-  let folder=null,ok=true;
-  try{folder=await createBackup({destination});console.log(new Date().toISOString(),'Копия создана:',folder);await prune(destination,keep)}
-  catch(error){ok=false;console.error(new Date().toISOString(),'Резервная копия не создана:',error.message)}
-  if(folder&&remoteConfigured()){
-    try{console.log(new Date().toISOString(),'Копия выгружена:',await uploadBackup(folder));await pruneRemote()}
-    catch(error){ok=false;console.error(new Date().toISOString(),'Копия не выгружена в S3:',error.message)}
+async function prune(destination,keep){
+  const backups=await localBackups(destination);
+  for(const name of backups.slice(0,Math.max(0,backups.length-keep)))await rm(join(resolve(destination),name),{recursive:true,force:true});
+}
+
+// Downloads a backup from S3 (the newest one without a name) into a local folder and verifies it.
+export async function downloadBackup(name,destination){
+  const {env,target}=await remote();
+  if(!name){
+    const all=(await listRemote()).map(item=>item.replace(/\/$/,'')).filter(item=>item.startsWith('opencrm-')).sort();
+    name=all.at(-1);
+    if(!name)throw new Error('В хранилище нет резервных копий');
   }
+  if(!/^opencrm-[\w-]+$/.test(name))throw new Error(`Некорректное имя копии: ${name}`);
+  const folder=join(resolve(destination),name);
+  if(await pathExists(folder))throw new Error(`Каталог уже существует: ${folder}`);
+  await run('rclone',['copy',target+name,folder,'--retries','5'],{extraEnv:env});
+  await verifyBackup(folder);
+  return folder;
+}
+
+// Restores straight from S3 into the (empty) database at DATABASE_URL and an empty UPLOAD_DIR.
+export async function restoreFromRemote(name,options={}){
+  const temp=await mkdtemp(join(tmpdir(),'opencrm-restore-'));
+  try{
+    const folder=await downloadBackup(name,temp);
+    console.log(new Date().toISOString(),'Копия скачана и проверена:',basename(folder));
+    return {backup:basename(folder),...await restoreBackup(folder,options)};
+  }finally{await rm(temp,{recursive:true,force:true})}
+}
+
+const log=(...items)=>console.log(new Date().toISOString(),...items);
+const logError=(...items)=>console.error(new Date().toISOString(),...items);
+
+// One full cycle. With BACKUP_KEEP=0 nothing stays on this host: every local copy is removed as soon as
+// S3 confirms it, and a copy that failed to upload is kept and retried on the next run.
+// Returns false if anything failed.
+export async function backupCycle(destination=join(root,'backups')){
+  const raw=process.env.BACKUP_KEEP,keep=raw===undefined||raw===''?14:Math.max(0,Number(raw)||0);
+  if(keep===0&&!remoteConfigured()){logError('BACKUP_KEEP=0 без настроенного S3: копии негде хранить');return false}
+  let folder=null,ok=true;
+  try{folder=await createBackup({destination});log('Копия создана:',basename(folder))}
+  catch(error){ok=false;logError('Резервная копия не создана:',error.message)}
+  if(remoteConfigured()){
+    const pending=keep===0?await localBackups(destination):folder?[basename(folder)]:[];
+    for(const name of pending){
+      try{
+        const where=await uploadBackup(join(resolve(destination),name));
+        log('Копия выгружена и сверена:',where);
+        if(keep===0){await rm(join(resolve(destination),name),{recursive:true,force:true});log('Локальная копия удалена:',name)}
+      }catch(error){ok=false;logError('Копия не выгружена в S3, повторим при следующем запуске:',name,error.message)}
+    }
+    try{await pruneRemote()}catch(error){ok=false;logError('Не удалось удалить старые копии в S3:',error.message)}
+  }
+  if(keep>0)await prune(destination,keep);
   return ok;
 }
 
@@ -203,9 +281,9 @@ export function msUntil(time,now=new Date()){
 }
 
 async function schedule(destination=join(root,'backups')){
-  const at=process.env.BACKUP_AT,hours=Math.max(1,Number(process.env.BACKUP_INTERVAL_HOURS)||24),keep=Math.max(1,Number(process.env.BACKUP_KEEP)||14);
+  const at=process.env.BACKUP_AT,hours=Math.max(1,Number(process.env.BACKUP_INTERVAL_HOURS)||24),keep=process.env.BACKUP_KEEP===undefined||process.env.BACKUP_KEEP===''?14:Math.max(0,Number(process.env.BACKUP_KEEP)||0);
   const zone=Intl.DateTimeFormat().resolvedOptions().timeZone;
-  console.log(`Резервные копии ${at?`каждый день в ${at} (${zone})`:`каждые ${hours} ч`} в ${resolve(destination)}, храним ${keep}${remoteConfigured()?`, выгрузка в S3: ${process.env.BACKUP_S3_BUCKET}/${process.env.BACKUP_S3_PREFIX||'opencrm'}`:''}`);
+  console.log(`Резервные копии ${at?`каждый день в ${at} (${zone})`:`каждые ${hours} ч`} ${keep?`в ${resolve(destination)}, на сервере храним ${keep}`:'только в S3, на сервере не храним'}${remoteConfigured()?`, выгрузка в S3: ${process.env.BACKUP_S3_BUCKET}/${process.env.BACKUP_S3_PREFIX||'opencrm'}`:''}`);
   // Without a fixed time the first copy waits a few minutes: the app creates the schema on its first start.
   if(!at)await new Promise(done=>setTimeout(done,5*60*1000));
   for(;;){
@@ -228,7 +306,9 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
     else if(action==='schedule')await schedule(path);
     else if(action==='now'){if(!await backupCycle(path))process.exitCode=1}
     else if(action==='upload'){if(!path)throw new Error('Укажите каталог копии');console.log(await uploadBackup(path))}
+    else if(action==='download'){console.log(await downloadBackup(path,process.argv[4]||join(root,'backups')))}
+    else if(action==='restore-s3'){console.log(await restoreFromRemote(path))}
     else if(action==='remote-list')console.log((await listRemote()).join('\n')||'В хранилище копий нет');
-    else throw new Error('Использование: backup.mjs create [каталог] | verify <копия> | restore <копия> | schedule [каталог] | now [каталог] | upload <копия> | remote-list');
+    else throw new Error('Использование: backup.mjs create [каталог] | verify <копия> | restore <копия> | schedule [каталог] | now [каталог] | upload <копия> | remote-list | download [имя] [каталог] | restore-s3 [имя]');
   }catch(error){console.error(error.message);process.exitCode=1}
 }

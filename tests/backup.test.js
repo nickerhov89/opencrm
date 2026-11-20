@@ -27,7 +27,7 @@ test('резервная копия Postgres и вложений проверя�
     await mkdir(join(uploads,'nested'),{recursive:true});
     await writeFile(join(uploads,'nested','brief.txt'),'Synthetic attachment');
     const backup=await createBackup({databaseUrl:urlFor(sourceName),uploads,destination:join(dir,'backups')});
-    assert.equal((await verifyBackup(backup)).files,2);
+    assert.equal((await verifyBackup(backup)).files,3,'дамп, вложение и инструкция по восстановлению');
     const target={databaseUrl:urlFor(targetName),uploads:join(dir,'restored-uploads')};
     await restoreBackup(backup,target);
     const restored=new pg.Client({connectionString:target.databaseUrl});await restored.connect();

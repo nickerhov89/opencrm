@@ -39,6 +39,7 @@ services:
 
   # Daily pg_dump + copy of attachments; the newest BACKUP_KEEP copies stay on this host and,
   # with BACKUP_S3_BUCKET set, every copy is also uploaded to S3-compatible storage.
+  # BACKUP_KEEP=0 keeps nothing here: a copy is deleted locally once S3 confirms it.
   backup:
     image: opencrm:local
     depends_on:
@@ -61,7 +62,8 @@ services:
       BACKUP_S3_KEEP_DAYS: ${BACKUP_S3_KEEP_DAYS:-30}
       BACKUP_S3_ENCRYPTION_PASSWORD: ${BACKUP_S3_ENCRYPTION_PASSWORD:-}
     volumes:
-      - opencrm_data:/app/data:ro
+      # Read-write only so that restore-s3 can put attachments back.
+      - opencrm_data:/app/data
       - opencrm_backups:/app/backups
     healthcheck:
       disable: true
