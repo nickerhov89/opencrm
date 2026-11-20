@@ -4,6 +4,8 @@
 //   node scripts/backup.mjs restore <backup>    into an EMPTY database at DATABASE_URL and an absent UPLOAD_DIR
 //   node scripts/backup.mjs schedule [folder]   keeps running: a backup every BACKUP_INTERVAL_HOURS (24),
 //                                               the newest BACKUP_KEEP (14) are kept
+//                                               or, with BACKUP_AT=HH:MM, every day at that time in TZ
+//   node scripts/backup.mjs now [folder]        one full cycle right away: copy, retention, S3 upload
 //   node scripts/backup.mjs upload <backup>     copies a backup to S3-compatible storage
 //   node scripts/backup.mjs remote-list         lists backups in that storage
 // With BACKUP_S3_BUCKET set, schedule also uploads every new backup with rclone to BACKUP_S3_ENDPOINT,
@@ -178,20 +180,42 @@ async function prune(destination,keep){
   for(const name of backups.slice(0,Math.max(0,backups.length-keep)))await rm(join(parent,name),{recursive:true,force:true});
 }
 
+// One full cycle: local copy, local retention, then the off-site copy. Returns false if anything failed.
+export async function backupCycle(destination=join(root,'backups')){
+  const keep=Math.max(1,Number(process.env.BACKUP_KEEP)||14);
+  let folder=null,ok=true;
+  try{folder=await createBackup({destination});console.log(new Date().toISOString(),'Копия создана:',folder);await prune(destination,keep)}
+  catch(error){ok=false;console.error(new Date().toISOString(),'Резервная копия не создана:',error.message)}
+  if(folder&&remoteConfigured()){
+    try{console.log(new Date().toISOString(),'Копия выгружена:',await uploadBackup(folder));await pruneRemote()}
+    catch(error){ok=false;console.error(new Date().toISOString(),'Копия не выгружена в S3:',error.message)}
+  }
+  return ok;
+}
+
+// Milliseconds until the next HH:MM in the process time zone (TZ, e.g. Europe/Moscow).
+export function msUntil(time,now=new Date()){
+  const match=/^([01]\d|2[0-3]):([0-5]\d)$/.exec(time||'');
+  if(!match)throw new Error(`BACKUP_AT должен быть в формате ЧЧ:ММ, получено «${time}»`);
+  const next=new Date(now);next.setHours(Number(match[1]),Number(match[2]),0,0);
+  if(next<=now)next.setDate(next.getDate()+1);
+  return next-now;
+}
+
 async function schedule(destination=join(root,'backups')){
-  const hours=Math.max(1,Number(process.env.BACKUP_INTERVAL_HOURS)||24),keep=Math.max(1,Number(process.env.BACKUP_KEEP)||14);
-  console.log(`Резервные копии каждые ${hours} ч в ${resolve(destination)}, храним ${keep}`);
-  // The app creates the schema on its first start; give it time before the first copy.
-  await new Promise(done=>setTimeout(done,5*60*1000));
+  const at=process.env.BACKUP_AT,hours=Math.max(1,Number(process.env.BACKUP_INTERVAL_HOURS)||24),keep=Math.max(1,Number(process.env.BACKUP_KEEP)||14);
+  const zone=Intl.DateTimeFormat().resolvedOptions().timeZone;
+  console.log(`Резервные копии ${at?`каждый день в ${at} (${zone})`:`каждые ${hours} ч`} в ${resolve(destination)}, храним ${keep}${remoteConfigured()?`, выгрузка в S3: ${process.env.BACKUP_S3_BUCKET}/${process.env.BACKUP_S3_PREFIX||'opencrm'}`:''}`);
+  // Without a fixed time the first copy waits a few minutes: the app creates the schema on its first start.
+  if(!at)await new Promise(done=>setTimeout(done,5*60*1000));
   for(;;){
-    let folder=null;
-    try{folder=await createBackup({destination});console.log(new Date().toISOString(),'Копия создана:',folder);await prune(destination,keep)}
-    catch(error){console.error(new Date().toISOString(),'Резервная копия не создана:',error.message)}
-    if(folder&&remoteConfigured()){
-      try{console.log(new Date().toISOString(),'Копия выгружена:',await uploadBackup(folder));await pruneRemote()}
-      catch(error){console.error(new Date().toISOString(),'Копия не выгружена в S3:',error.message)}
+    if(at){
+      const wait=msUntil(at);
+      console.log(new Date().toISOString(),'Следующая копия:',new Date(Date.now()+wait).toLocaleString('ru-RU',{timeZone:zone}));
+      await new Promise(done=>setTimeout(done,wait));
     }
-    await new Promise(done=>setTimeout(done,hours*3600*1000));
+    await backupCycle(destination);
+    if(!at)await new Promise(done=>setTimeout(done,hours*3600*1000));
   }
 }
 
@@ -202,8 +226,9 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
     else if(action==='verify'){if(!path)throw new Error('Укажите каталог копии');console.log(await verifyBackup(path))}
     else if(action==='restore'){if(!path)throw new Error('Укажите каталог копии');console.log(await restoreBackup(path))}
     else if(action==='schedule')await schedule(path);
+    else if(action==='now'){if(!await backupCycle(path))process.exitCode=1}
     else if(action==='upload'){if(!path)throw new Error('Укажите каталог копии');console.log(await uploadBackup(path))}
     else if(action==='remote-list')console.log((await listRemote()).join('\n')||'В хранилище копий нет');
-    else throw new Error('Использование: backup.mjs create [каталог] | verify <копия> | restore <копия> | schedule [каталог] | upload <копия> | remote-list');
+    else throw new Error('Использование: backup.mjs create [каталог] | verify <копия> | restore <копия> | schedule [каталог] | now [каталог] | upload <копия> | remote-list');
   }catch(error){console.error(error.message);process.exitCode=1}
 }
