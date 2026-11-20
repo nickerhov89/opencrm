@@ -5,8 +5,4 @@ dist
 data
 uploads
 docs
-tests
-*.db
-*.db-shm
-*.db-wal
 *.log

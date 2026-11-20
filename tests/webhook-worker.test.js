@@ -19,7 +19,7 @@ test('production worker delivers a webhook without a manual queue call', {timeou
   const project = resolve(import.meta.dirname, '..');
   const child = spawn(process.execPath, ['server/index.js'], {
     cwd: project,
-    env: {...process.env, NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(port), DATABASE_PATH: join(directory, 'crm.db'), UPLOAD_DIR: join(directory, 'uploads'), OPENCRM_WEBHOOK_ALLOWED_HOSTS: '127.0.0.1'},
+    env: {...process.env, NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(port), PGLITE_DIR: join(directory, 'pg'), UPLOAD_DIR: join(directory, 'uploads'), OPENCRM_WEBHOOK_ALLOWED_HOSTS: '127.0.0.1'},
     stdio: 'ignore'
   });
   const base = `http://127.0.0.1:${port}/api`;

@@ -19,9 +19,10 @@
     "admin": "node --env-file-if-exists=.env scripts/admin.mjs"
   },
   "dependencies": {
-    "better-sqlite3": "^12.4.1",
+    "@electric-sql/pglite": "0.5.16",
     "express": "^5.1.0",
     "lucide-react": "^0.468.0",
+    "pg": "8.23.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

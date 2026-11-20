@@ -8,7 +8,7 @@ import {join} from 'node:path';
 
 test('API keys, idempotent leads and signed webhook retries work end to end', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'opencrm-integrations-'));
-  process.env.DATABASE_PATH = join(directory, 'crm.db');
+  process.env.PGLITE_DIR = join(directory, 'pg');
   process.env.UPLOAD_DIR = join(directory, 'uploads');
   process.env.NODE_ENV = 'test';
   process.env.OPENCRM_ALLOW_LOCAL_WEBHOOKS = '1';
@@ -59,14 +59,14 @@ test('API keys, idempotent leads and signed webhook retries work end to end', as
     assert.equal(created.status, 'pending');
     assert.equal((await request('/v1/leads', 'POST', lead, 200, leadHeaders)).id, created.id);
     await request('/v1/leads', 'POST', {...lead, title: 'Other'}, 409, leadHeaders);
-    assert.equal(db.prepare('SELECT COUNT(*) n FROM inbox_leads').get().n, 1);
+    assert.equal((await db.prepare('SELECT COUNT(*) n FROM inbox_leads').get()).n, 1);
     await request('/v1/pipelines', 'GET', null, 403, {Authorization: `Bearer ${leadKey.token}`});
 
     assert.equal(await processWebhookQueue(db), 1);
     let delivery = (await request(`/integrations/webhooks/${endpoint.id}/deliveries`))[0];
     assert.equal(delivery.status, 'pending');
     assert.equal(delivery.response_status, 503);
-    db.prepare('UPDATE webhook_deliveries SET next_attempt_at=0 WHERE id=?').run(delivery.id);
+    await db.prepare('UPDATE webhook_deliveries SET next_attempt_at=0 WHERE id=?').run(delivery.id);
     assert.equal(await processWebhookQueue(db), 1);
     delivery = (await request(`/integrations/webhooks/${endpoint.id}/deliveries`))[0];
     assert.equal(delivery.status, 'delivered');
@@ -100,10 +100,10 @@ test('API keys, idempotent leads and signed webhook retries work end to end', as
     const ping = await request(`/integrations/webhooks/${endpoint.id}/test`, 'POST', null, 202);
     assert.equal(await processWebhookQueue(db), 1);
     assert.equal(received.at(-1).data.type, 'test.ping');
-    db.prepare("UPDATE webhook_deliveries SET status='failed' WHERE id=?").run(ping.delivery_id);
+    await db.prepare("UPDATE webhook_deliveries SET status='failed' WHERE id=?").run(ping.delivery_id);
     await request(`/integrations/webhooks/${endpoint.id}/deliveries/${ping.delivery_id}/retry`, 'POST');
     assert.equal(await processWebhookQueue(db), 1);
-    assert.equal(db.prepare('SELECT status FROM webhook_deliveries WHERE id=?').get(ping.delivery_id).status, 'delivered');
+    assert.equal((await db.prepare('SELECT status FROM webhook_deliveries WHERE id=?').get(ping.delivery_id)).status, 'delivered');
 
     await request(`/integrations/keys/${leadKey.id}`, 'DELETE');
     await request('/v1/leads', 'POST', lead, 401, leadHeaders);
@@ -114,7 +114,7 @@ test('API keys, idempotent leads and signed webhook retries work end to end', as
     await request('/integrations/webhooks', 'GET', null, 403);
   } finally {
     await Promise.all([new Promise(resolve => server.close(resolve)), new Promise(resolve => receiver.close(resolve))]);
-    db.close();
+    await db.close();
     rmSync(directory, {recursive: true, force: true});
     delete process.env.OPENCRM_ALLOW_LOCAL_WEBHOOKS;
   }

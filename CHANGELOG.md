@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — PostgreSQL
+
+- Data is stored in PostgreSQL instead of SQLite. Docker Compose now starts the app, PostgreSQL 17 and a backup service with daily `pg_dump` and attachment copies. Without `DATABASE_URL` the app runs on embedded PGlite (tests, demo, local development). There is no automatic migration from SQLite: a new installation starts empty.
+- Backups are `pg_dump` archives with checksums; restore goes into an empty database.
+- Malformed numeric input now returns 400 instead of a server error.
+
 ## Unreleased — security hardening
 
 - Admins can disable employees, set a new password, end all of an employee's sessions and reset their two-factor sign-in; disabling or resetting ends sessions immediately. A server-side `npm run admin` command recovers a locked-out administrator.

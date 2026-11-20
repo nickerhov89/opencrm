@@ -1,19 +1,61 @@
+# OpenCRM + PostgreSQL. Put POSTGRES_PASSWORD (letters and digits) into .env next to this file:
+#   echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> .env
+x-database-url: &database-url postgresql://opencrm:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/opencrm
+
 services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: opencrm
+      POSTGRES_USER: opencrm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_INITDB_ARGS: --locale-provider=icu --icu-locale=ru-RU
+    volumes:
+      - opencrm_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opencrm -d opencrm"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
   opencrm:
     build: .
     image: opencrm:local
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "127.0.0.1:${OPENCRM_PORT:-3001}:3001"
     environment:
+      DATABASE_URL: *database-url
       COOKIE_SECURE: ${COOKIE_SECURE:-0}
       ATTACHMENT_QUOTA_MB: ${ATTACHMENT_QUOTA_MB:-10240}
       ATTACHMENT_USER_QUOTA_MB: ${ATTACHMENT_USER_QUOTA_MB:-2048}
       OPENCRM_WEBHOOK_ALLOWED_HOSTS: ${OPENCRM_WEBHOOK_ALLOWED_HOSTS:-}
     volumes:
       - opencrm_data:/app/data
+    restart: unless-stopped
+
+  # Daily pg_dump + copy of attachments, the newest BACKUP_KEEP copies are kept.
+  backup:
+    image: opencrm:local
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["node", "scripts/backup.mjs", "schedule", "/app/backups"]
+    environment:
+      DATABASE_URL: *database-url
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+    volumes:
+      - opencrm_data:/app/data:ro
       - opencrm_backups:/app/backups
+    healthcheck:
+      disable: true
     restart: unless-stopped
 
 volumes:
+  opencrm_pg:
   opencrm_data:
   opencrm_backups:

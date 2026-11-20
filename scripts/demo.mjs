@@ -7,7 +7,6 @@ const root=resolve(import.meta.dirname,'..');
 if(!existsSync(join(root,'dist/index.html'))){console.error('Сначала соберите интерфейс: npm run build');process.exit(1)}
 
 const folder=mkdtempSync(join(tmpdir(),'opencrm-demo-'));
-process.env.DATABASE_PATH=join(folder,'demo.db');
 process.env.UPLOAD_DIR=join(folder,'uploads');
 process.env.NODE_ENV='test';
 process.env.OPENCRM_WEBHOOK_WORKER='1';

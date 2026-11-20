@@ -13,7 +13,7 @@ test('CSV export neutralizes spreadsheet formulas in user-provided cells',()=>{
 
 test('cross-origin writes are rejected and repeated login failures are throttled',async()=>{
   const folder=mkdtempSync(join(tmpdir(),'opencrm-security-'));
-  process.env.DATABASE_PATH=join(folder,'crm.db');
+  process.env.PGLITE_DIR=join(folder,'pg');
   process.env.UPLOAD_DIR=join(folder,'uploads');
   process.env.NODE_ENV='test';
   const {app,db}=await import('../server/index.js');
@@ -44,7 +44,7 @@ test('cross-origin writes are rejected and repeated login failures are throttled
   }finally{
     server.closeAllConnections();
     await new Promise(resolve=>server.close(resolve));
-    db.close();
+    await db.close();
     rmSync(folder,{recursive:true,force:true});
   }
 });
