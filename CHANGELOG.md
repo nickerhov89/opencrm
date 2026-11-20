@@ -2,6 +2,7 @@
 
 ## Unreleased — PostgreSQL
 
+- `BACKUP_KEEP=0` keeps no copies on the host: each copy is deleted once S3 confirms it, failed uploads are retried. `backup.mjs restore-s3` restores the newest (or a named) copy straight from S3; every copy is a single opencrm-<time>.tar.gz with the full dump, attachments, checksums and RESTORE.txt.
 - Backups run every day at a fixed time (`BACKUP_AT`, default 00:00 Moscow time); `backup.mjs now` runs one full cycle on demand.
 - The backup service can upload every copy to S3-compatible storage with rclone, check it after upload, optionally encrypt it, and delete remote copies older than `BACKUP_S3_KEEP_DAYS`.
 - Data is stored in PostgreSQL instead of SQLite. Docker Compose now starts the app, PostgreSQL 17 and a backup service with daily `pg_dump` and attachment copies. Without `DATABASE_URL` the app runs on embedded PGlite (tests, demo, local development). There is no automatic migration from SQLite: a new installation starts empty.

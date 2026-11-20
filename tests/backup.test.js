@@ -27,15 +27,17 @@ test('резервная копия Postgres и вложений проверя�
     await mkdir(join(uploads,'nested'),{recursive:true});
     await writeFile(join(uploads,'nested','brief.txt'),'Synthetic attachment');
     const backup=await createBackup({databaseUrl:urlFor(sourceName),uploads,destination:join(dir,'backups')});
-    assert.equal((await verifyBackup(backup)).files,2);
+    assert.match(backup,/opencrm-[\w-]+\.tar\.gz$/,'одна копия — один файл');
+    assert.equal((await verifyBackup(backup)).files,3,'дамп, вложение и инструкция по восстановлению');
     const target={databaseUrl:urlFor(targetName),uploads:join(dir,'restored-uploads')};
     await restoreBackup(backup,target);
     const restored=new pg.Client({connectionString:target.databaseUrl});await restored.connect();
     try{assert.equal((await restored.query('SELECT name FROM users')).rows[0].name,'Test client')}finally{await restored.end()}
     assert.equal(await readFile(join(target.uploads,'nested','brief.txt'),'utf8'),'Synthetic attachment');
     await assert.rejects(()=>restoreBackup(backup,target),/не пустая/);
-    await writeFile(join(backup,'uploads','nested','brief.txt'),'Corrupted');
-    await assert.rejects(()=>verifyBackup(backup),/Повреждён файл/);
+    const bytes=await readFile(backup);
+    await writeFile(backup,bytes.subarray(0,Math.floor(bytes.length/2)));
+    await assert.rejects(()=>verifyBackup(backup));
   }finally{
     await admin.query(`DROP DATABASE IF EXISTS ${sourceName} WITH (FORCE)`).catch(()=>{});
     await admin.query(`DROP DATABASE IF EXISTS ${targetName} WITH (FORCE)`).catch(()=>{});
