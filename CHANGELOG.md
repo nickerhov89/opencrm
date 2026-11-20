@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — full API v1
+
+- API v1 covers deals, contacts, companies, tasks, notes, calls, employees, custom fields and pipelines: list with filters, cursor pagination and `updated_since` sync, read, create (with `Idempotency-Key`), update, and move to the trash. New key scopes: `contacts:*`, `companies:*`, `tasks:*`, `users:read`, `pipelines:write`, `fields:write`; `deals:write` now covers creating, updating and deleting deals, not only changing the stage. See docs/INTEGRATIONS.md.
+- Stage transition rules per pipeline: free movement, or only listed from → to stages, and an option to keep deals in their pipeline. Set in the pipeline settings (**Правила переходов**) or through the API; they apply to employees and API keys, administrators are exempt in the interface.
+- New webhook events: `deal.updated`, `deal.deleted`, `contact.*`, `company.*`, `task.*`, `note.created`. Deal payloads include contact and company IDs. Events are stored only while an endpoint subscribes to them.
+- Contacts, companies and tasks have `updated_at`.
+
 ## Unreleased — PostgreSQL
 
 - `BACKUP_KEEP=0` keeps no copies on the host: each copy is deleted once S3 confirms it, failed uploads are retried. `backup.mjs restore-s3` restores the newest (or a named) copy straight from S3; every copy is a single opencrm-<time>.tar.gz with the full dump, attachments, checksums and RESTORE.txt.

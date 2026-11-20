@@ -18,7 +18,8 @@ OpenCRM is an independent project. It is not affiliated with amoCRM and does not
 - Accept leads through a built-in public form, search across records, import/export CSV, and view basic sales reports.
 - Create users with roles and ownership-based visibility; restore deleted records from the trash.
 - Store data in PostgreSQL; back up the database (pg_dump) and attachments on a schedule, verify checksums, and restore into an empty database.
-- Connect external systems with scoped API keys and signed, retried webhooks for leads and deals.
+- Connect external systems with scoped API keys: a full API v1 for deals, contacts, companies, tasks, notes, employees, custom fields and pipelines, and signed, retried webhooks for their changes.
+- Limit how deals move: per-pipeline stage transition rules and a lock that keeps deals in their pipeline.
 
 The application is designed for a team running its own instance. The [generic API and webhooks](docs/INTEGRATIONS.md) can connect it to other services. Built-in email, messaging, telephony, and amoCRM synchronization are **not** included; communication records are entered manually and do not send messages.
 
