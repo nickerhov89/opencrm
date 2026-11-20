@@ -75,7 +75,7 @@ docker compose up --build -d
 
 ## Резервная копия
 
-В Docker Compose служба `backup` раз в сутки (`BACKUP_INTERVAL_HOURS`) делает `pg_dump` базы и копию вложений и хранит последние `BACKUP_KEEP` копий (14). База снимается согласованно на ходу, но файлы, добавленные или удалённые во время копирования, могут не совпасть со снимком базы. Для запуска без Docker нужны `pg_dump`, `pg_restore` и `psql` той же или более новой версии, что и сервер PostgreSQL.
+В Docker Compose служба `backup` каждый день в `BACKUP_AT` (по умолчанию 00:00 по Москве, пояс — `BACKUP_TZ`) делает `pg_dump` базы и копию вложений и хранит последние `BACKUP_KEEP` копий (14). База снимается согласованно на ходу, но файлы, добавленные или удалённые во время копирования, могут не совпасть со снимком базы. Для запуска без Docker нужны `pg_dump`, `pg_restore` и `psql` той же или более новой версии, что и сервер PostgreSQL.
 
 ```bash
 npm run backup
@@ -83,6 +83,20 @@ npm run backup:verify -- ./backups/opencrm-ИМЯ_КОПИИ
 ```
 
 Команда создаёт каталог в `./backups` с базой, вложениями и контрольными суммами. `backups/` исключён из Git. Для Docker вручную: `docker compose exec backup node scripts/backup.mjs create /app/backups`; готовый каталог будет в отдельном томе `opencrm_backups`. Регулярно выгружайте копии за пределы сервера или Docker-хоста: один локальный диск не защищает от его потери.
+
+**Копии в S3.** Служба `backup` может сама выгружать каждую новую копию в S3-совместимое хранилище (Yandex Object Storage, Selectel, VK Cloud, MinIO). Создайте бакет и ключ доступа только к нему и добавьте в `.env` рядом с `compose.yaml`:
+
+```bash
+BACKUP_S3_ENDPOINT=https://storage.yandexcloud.net
+BACKUP_S3_REGION=ru-central1
+BACKUP_S3_BUCKET=имя-бакета
+BACKUP_S3_ACCESS_KEY_ID=...
+BACKUP_S3_SECRET_ACCESS_KEY=...
+# Необязательно: шифровать файлы до отправки. Храните пароль вне сервера — без него копию не восстановить.
+BACKUP_S3_ENCRYPTION_PASSWORD=...
+```
+
+Затем `docker compose up -d backup`. Копии кладутся в папку `BACKUP_S3_PREFIX` (по умолчанию `opencrm`), после загрузки сверяются с локальными, а копии старше `BACKUP_S3_KEEP_DAYS` дней (30) удаляются. Сделать копию и выгрузку прямо сейчас: `docker compose exec backup node scripts/backup.mjs now /app/backups`. Проверить отдельно: `docker compose exec backup node scripts/backup.mjs upload /app/backups/opencrm-ИМЯ_КОПИИ` и `docker compose exec backup node scripts/backup.mjs remote-list`. Чтобы восстановить копию из хранилища, скачайте её папку (для зашифрованной — через rclone с тем же паролем) и выполните `backup:restore`.
 
 Для восстановления остановите CRM, создайте новую пустую базу и укажите её в `DATABASE_URL`, освободите `UPLOAD_DIR`. Затем выполните `npm run backup:restore -- /путь/к/копии`. Команда сперва проверит состав, SHA-256 и читаемость дампа; она откажется восстанавливать в непустую базу или каталог вложений. Запустите CRM и проверьте вход, сделки и файлы.
 
