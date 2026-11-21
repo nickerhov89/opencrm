@@ -8,6 +8,7 @@ import { parseCsv, quoteCsvCell } from './csv.js';
 import { registerIntegrations } from './integrations.js';
 import { registerMail, dealEmails, secretFilePath } from './mail.js';
 import { registerNotifications } from './notifications.js';
+import { registerPlugins } from './plugins.js';
 import { createStageRules, RuleError } from './stage-rules.js';
 import { permissionEntities, permissionActions, normalizePermissions, noPermissions, defaultMemberPermissions, securityHeaders, createLoginLimiter, newTotpSecret, verifyTotp, otpauthUrl } from './security.js';
 import {defaultDealCardFields,validDealCardFields} from '../src/deal-card-layout.js';
@@ -980,6 +981,7 @@ function registerPurge(){
 registerIntegrations(app,db,{auth,admin,audit,event,entityEvent,logEntityChanges,logDealChanges,runStageAutomation,customValueError,parseTags,taskSchedule,stageRules});
 registerMail(app,db,{auth,admin,audit,requirePermission,secretFile:secretFilePath(uploadDir)});
 registerNotifications(app,db,{auth});
+const plugins=registerPlugins(app,db,{auth,admin,audit,uploadDir,secretFile:secretFilePath(uploadDir)});await plugins.start();
 registerPurge();
 app.use(express.static(resolve(root,'dist')));
 app.get('/{*path}',(req,res) => { if (isApiPath(req.path)) return fail(res,404,'Маршрут не найден'); res.sendFile(resolve(root,'dist/index.html')); });
@@ -987,4 +989,4 @@ app.get('/{*path}',(req,res) => { if (isApiPath(req.path)) return fail(res,404,'
 const badInputCodes=new Set(['22P02','22003','22007','22008','22021','2201X','2201W']);
 app.use((err,_req,res,_next) => { if(badInputCodes.has(err?.code))return fail(res,400,'Проверьте введённые данные'); if(err?.status>=400&&err.status<500)return fail(res,err.status,'Неверный запрос'); console.error(err); fail(res,500,'Ошибка сервера'); });
 if (process.env.NODE_ENV !== 'test') { const port=Number(process.env.PORT)||3001,host=process.env.HOST||'127.0.0.1'; app.listen(port,host,()=>console.log(`OpenCRM: http://${host}:${port}`)); }
-export { app, db };
+export { app, db, plugins };

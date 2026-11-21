@@ -6,6 +6,7 @@ import IntegrationSettings from './IntegrationSettings.jsx';
 import MailSettings from './MailSettings.jsx';
 import SecuritySettings from './SecuritySettings.jsx';
 import AuditLog from './AuditLog.jsx';
+import PluginSettings from './PluginSettings.jsx';
 import './settings.css';
 
 const entityNames={deal:'Сделки',contact:'Контакты',company:'Компании'};
@@ -24,7 +25,7 @@ export default function SettingsPage({initialSection,auth,users,groups,pipelines
   useEffect(()=>{if(selected===pipeline)setLocalStages(stages)},[stages,pipeline,selected]);
   useEffect(()=>{if(!selected||selected===pipeline)return;api('/stages?pipeline_id='+selected).then(setLocalStages).catch(onError)},[selected,pipelines,stages]);
   const saveAccount=async e=>{e.preventDefault();setSaving(true);try{const result=await api('/settings',{method:'PATCH',body:{name:draft}});setAccount(result.name);setDraft(result.name);onAccountChange?.(result.name)}catch(err){onError(err)}finally{setSaving(false)}};
-  const sections=[['general','Общие настройки'],['users','Пользователи'],['pipelines','Воронки и этапы'],['fields','Поля'],['security','Безопасность'],...(isAdmin?[['mail','Почта'],['integrations','Интеграции'],['audit','Журнал безопасности']]:[]),['trash','Корзина']];
+  const sections=[['general','Общие настройки'],['users','Пользователи'],['pipelines','Воронки и этапы'],['fields','Поля'],['security','Безопасность'],...(isAdmin?[['mail','Почта'],['integrations','Интеграции'],['plugins','Плагины'],['audit','Журнал безопасности']]:[]),['trash','Корзина']];
   const title=sections.find(([key])=>key===section)?.[1];
   return <div className="settings-layout">
     <aside className="settings-nav"><h1>НАСТРОЙКИ</h1>{sections.map(([key,label])=><button key={key} className={section===key?'active':''} onClick={()=>setSection(key)}>{label}{section===key&&<ChevronRight size={15}/>}</button>)}<div className="settings-nav-bottom"><button onClick={onLogout}><LogOut size={16}/> Выйти из аккаунта</button></div></aside>
@@ -36,6 +37,7 @@ export default function SettingsPage({initialSection,auth,users,groups,pipelines
       {section==='mail'&&isAdmin&&<MailSettings api={api} onError={onError}/>}
       {section==='integrations'&&isAdmin&&<IntegrationSettings api={api} onError={onError}/>}
       {section==='security'&&<SecuritySettings auth={auth} api={api} onError={onError} onAuthChange={onAuthChange}/>}
+      {section==='plugins'&&isAdmin&&<PluginSettings api={api} onError={onError}/>}
       {section==='audit'&&isAdmin&&<AuditLog api={api} onError={onError}/>}
       {section==='trash'&&<TrashDeals api={api} isAdmin={isAdmin} onError={onError} onRefresh={onRefresh}/>}
     </div>
