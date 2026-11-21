@@ -20,3 +20,15 @@
 /* Dragging the board sideways by an empty spot (drag-scroll.js). */
 .board.drag-scrolling{cursor:grabbing;user-select:none}
 .board.drag-scrolling *{cursor:grabbing}
+/* The line above the board, as in amoCRM. */
+.board-summary{display:flex;gap:16px;align-items:flex-start;padding:14px 28px 10px;background:#f5f5f6;border-bottom:1px solid #e4e7e9;flex:0 0 auto}
+.board-summary>div{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:3px}
+.board-summary small{font-size:11px;color:#8a969e;white-space:nowrap}
+.board-summary b{font-size:17px;font-weight:400;color:#5c6870}
+.board-summary b.ok{color:#3fa66b}
+.board-summary b.warn{color:#e0a240}
+.board-summary b.bad{color:#e0525b}
+.board-summary-forecast{align-items:flex-end;text-align:right}
+.board-summary-forecast small{font-size:12px;color:#5c6870}
+.board-summary-forecast b{white-space:nowrap}
+@media(max-width:760px){.board-summary{padding:10px 12px;gap:10px;overflow-x:auto}.board-summary>div{flex:0 0 auto}}

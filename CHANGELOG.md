@@ -20,6 +20,9 @@
 
 ## Unreleased — closer to amoCRM
 
+- Left menu icons in thin circles as in amoCRM (Рабочий стол — speedometer, Сделки — dollar, Задачи — check, Аналитика — chart, Настройки — wrench); the current section has a filled circle.
+- A line above the deal board as in amoCRM: tasks for today, deals without tasks, overdue tasks, new deals today / yesterday and the sales forecast against the month's goals.
+- Deals: clicking «Поиск и фильтр» opens the filter menu (quick filters, deal properties, tags) as in amoCRM, and typing filters the board; the field no longer stands out in the dark theme.
 - «Чат» in a deal: employees write to each other about the deal (to one or several colleagues or to everyone who can open it). The message is in the deal feed with who has read it and in the recipients' «Сообщения» until they open the deal.
 - The deal board scrolls sideways when you press the mouse on an empty spot and drag, as in amoCRM.
 - Analytics → **Звонки**: incoming and outgoing calls of each employee with their length (by count or by duration), the average and the total, and the latest calls with links to the deal, contact or company and the recording. Counts calls loaded from amoCRM, calls recorded in the deal feed and calls of the Mango Office plugin, each once.
