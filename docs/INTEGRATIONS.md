@@ -187,7 +187,7 @@ Needs the read scope of that type. Items: `id`, `entity_type`, `entity_id`, `bod
 
 ## Loading data from amoCRM
 
-A one-time load that keeps amoCRM IDs goes straight into PostgreSQL; see [AMOCRM_IMPORT.md](AMOCRM_IMPORT.md).
+`scripts/amocrm-import.mjs` moves an amoCRM account in once, keeping amoCRM IDs; see [AMOCRM_IMPORT.md](AMOCRM_IMPORT.md).
 
 ## Leads
 
