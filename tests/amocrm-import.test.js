@@ -320,6 +320,7 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
     const card = await call('/deals/21000001');
     assert.deepEqual(card.activity.map(a => [a.created_at, a.author, a.event]).reverse(), expectedHistory);
     assert.equal(card.stage_since, '2025-04-01 08:00:00', 'time in stage counts from the last stage change');
+    assert.deepEqual(card.related_activity.map(a => [a.entity_type, a.entity_id, a.entity_name, a.event]).reverse(), [['contact', 4001, 'Иван Петров', 'Контакт создан'], ['contact', 4001, 'Иван Петров', 'Поле «Email»: — → Ivan@Romashka.test']], 'the deal feed shows the history of its contacts and company, as amoCRM does');
     assert.ok(JSON.stringify(await call('/contacts/4001')).includes('Поле «Email»: — → Ivan@Romashka.test'), 'contact history is shown on the contact');
     assert.deepEqual((await db.query("SELECT event FROM entity_activity WHERE entity_type='contact' AND entity_id=4001 ORDER BY created_at")).rows.map(r => r.event), ['Контакт создан', 'Поле «Email»: — → Ivan@Romashka.test']);
 
