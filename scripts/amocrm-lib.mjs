@@ -654,6 +654,8 @@ export async function loadDump(db, dump, {dryRun = false, replace = false, keepD
         droppedPipelines = (await db.query("SELECT p.id FROM pipelines p WHERE p.id <> ALL($1) AND p.name = 'Воронка — новые лиды' AND NOT EXISTS (SELECT 1 FROM deals d JOIN stages s ON s.id=d.stage_id WHERE s.pipeline_id=p.id) AND NOT EXISTS (SELECT 1 FROM inbox_leads l WHERE l.pipeline_id=p.id) AND NOT EXISTS (SELECT 1 FROM lead_forms f WHERE f.pipeline_id=p.id)", [amoPipelines])).rows.map(r => Number(r.id));
         await dropPipelines(db, droppedPipelines);
       }
+      // With the history in the export the server need not load it from amoCRM after start.
+      if (dump.events_history != null) await db.query('INSERT INTO app_settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value', [historySettingKey, JSON.stringify({at: new Date().toISOString(), from: 'export'})]);
       await db.query('SET LOCAL session_replication_role = origin');
       await db.query('SELECT sync_id_sequences()');
       // Consistency check, since foreign keys were not enforced during the load.
@@ -677,6 +679,48 @@ export async function loadDump(db, dump, {dryRun = false, replace = false, keepD
   return report;
 }
 
+// Run once by the server after a deploy (server/index.js) when AMO_BASE_URL and AMO_ACCESS_TOKEN are
+// set: downloads the events of deals, contacts and companies straight from amoCRM and writes the card
+// history of the records already loaded here, page by page. Names come from this database and from
+// the small amoCRM lists (users, pipelines, fields). Done once: app_settings remembers it; an
+// interrupted run starts again on the next start (history from amoCRM is replaced, not duplicated).
+export const historySettingKey = 'amocrm_history_loaded';
+export async function syncHistoryFromAmo(db, client, {log = console.log} = {}) {
+  if ((await db.query('SELECT value FROM app_settings WHERE key=$1', [historySettingKey])).rows.length) return null;
+  const all = async (sql) => (await db.query(sql)).rows.map(r => ({...r, id: Number(r.id)}));
+  const [deals, contacts, companies, users] = [await all('SELECT id,name FROM deals'), await all('SELECT id,name FROM contacts'), await all('SELECT id,name FROM companies'), await all('SELECT id,email FROM users')];
+  if (!deals.length && !contacts.length && !companies.length) { log('amoCRM: в CRM нет записей, история не нужна'); return null; }
+  const list = async (path, key, params = {}, limit = 250) => client.list(path, key, params, limit);
+  const amoUsers = await list('/api/v4/users', 'users');
+  const pipelines = (await client.request('/api/v4/leads/pipelines'))?._embedded?.pipelines || [];
+  const dump = {users: amoUsers, pipelines, leads: deals, contacts, companies, event_types: []};
+  for (const entity of ['leads', 'contacts', 'companies']) dump[`custom_fields_${entity}`] = await list(`/api/v4/${entity}/custom_fields`, 'custom_fields', {}, 50);
+  try { dump.event_types = Object.values((await client.request('/api/v4/events/types', {language_code: 'ru'}))?._embedded || {}).find(Array.isArray) || []; } catch (error) { log(`amoCRM: типы событий: ${error.message}`); }
+  // An amoCRM employee is the account here with the same e-mail, or the account with the amoCRM ID.
+  const byEmail = new Map(users.map(u => [String(u.email).toLowerCase(), u.id])), userIds = new Set(users.map(u => u.id));
+  const userMap = new Map(amoUsers.map(u => [Number(u.id), byEmail.get(String(u.email || '').trim().toLowerCase()) ?? (userIds.has(Number(u.id)) ? Number(u.id) : null)]));
+  const ids = {uid: id => userMap.get(Number(id)) ?? null, dealIds: new Set(deals.map(r => r.id)), contactIds: new Set(contacts.map(r => r.id)), companyIds: new Set(companies.map(r => r.id)), warn: () => {}};
+  const affected = result => Number(result.rowCount ?? result.affectedRows ?? 0);
+  const replaced = affected(await db.query('DELETE FROM activity WHERE amo_event_id IS NOT NULL')) + affected(await db.query('DELETE FROM entity_activity WHERE amo_event_id IS NOT NULL'));
+  log(`amoCRM: загрузка истории карточек${replaced ? ` (заменяется загруженная раньше: ${replaced})` : ''}`);
+  const counts = {events: 0, activity: 0, entity_activity: 0};
+  let lastLog = Date.now();
+  for (let page = 1; ; page++) {
+    const data = await client.request('/api/v4/events', {'filter[entity][]': ['lead', 'contact', 'company'], limit: 100, page});
+    const events = data?._embedded?.events || [];
+    const rows = {activity: [], entity_activity: []};
+    historyRows({...dump, events_history: events}, rows, ids);
+    await insertRows(db, 'activity', rows.activity);
+    await insertRows(db, 'entity_activity', rows.entity_activity);
+    counts.events += events.length; counts.activity += rows.activity.length; counts.entity_activity += rows.entity_activity.length;
+    if (Date.now() - lastLog > 30000) { lastLog = Date.now(); log(`amoCRM: событий ${counts.events}, записей истории ${counts.activity + counts.entity_activity}`); }
+    if (!events.length || !data._links?.next) break;
+  }
+  await db.query('INSERT INTO app_settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value', [historySettingKey, JSON.stringify({at: new Date().toISOString(), ...counts})]);
+  log(`amoCRM: история загружена — событий ${counts.events}, в сделках ${counts.activity}, в контактах и компаниях ${counts.entity_activity}`);
+  return counts;
+}
+
 // Adds the card history of an export to a CRM where the export is already loaded, without touching
 // anything else. History loaded from amoCRM earlier (rows with amo_event_id) is replaced; history
 // written in OpenCRM stays. Records missing here are skipped.
@@ -698,6 +742,7 @@ export async function loadHistory(db, dump, {dryRun = false, log = console.log} 
       const removed = {activity: affected(await db.query('DELETE FROM activity WHERE amo_event_id IS NOT NULL')), entity_activity: affected(await db.query('DELETE FROM entity_activity WHERE amo_event_id IS NOT NULL'))};
       await insertRows(db, 'activity', activity); log(`  activity: ${activity.length}`);
       await insertRows(db, 'entity_activity', entityActivity); log(`  entity_activity: ${entityActivity.length}`);
+      await db.query('INSERT INTO app_settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value', [historySettingKey, JSON.stringify({at: new Date().toISOString(), from: 'export'})]);
       await db.query('SET LOCAL session_replication_role = origin');
       await db.query('SELECT sync_id_sequences()');
       const historyWarnings = Object.fromEntries(Object.entries(warnings).filter(([text]) => /истори/i.test(text)));
