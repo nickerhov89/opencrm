@@ -13,6 +13,7 @@ test('mail section: folders, read marks, new letters and the «Сообщени�
   process.env.PGLITE_DIR = join(dir, 'pg');
   process.env.UPLOAD_DIR = join(dir, 'uploads');
   process.env.NODE_ENV = 'test';
+  process.env.MAIL_SEND_PER_HOUR = '5';
   delete process.env.OPENCRM_SECRET_KEY;
   const {app, db} = await import('../server/index.js');
   const {mailHooks} = await import('../server/mail.js');
@@ -56,7 +57,7 @@ test('mail section: folders, read marks, new letters and the «Сообщени�
     const foreign = await deal('Чужая сделка', await contact('Другой', 'other@beta.test'), adminId);
 
     // Without a mailbox there is nothing to send from.
-    assert.deepEqual(await call('/api/mail/summary'), {unread: 0, can_send: true, mailboxes: []});
+    assert.deepEqual(await call('/api/mail/summary'), {unread: 0, can_send: false, send_mailboxes: [], max_recipients: 10, mailboxes: []});
     await call('/api/mail/send', {method: 'POST', body: {to: ['client@acme.test'], subject: 'Тема', text: 'Текст'}, status: 400});
     const mailbox = await call('/api/mail/mailboxes', {method: 'POST', body: {email: 'sales@agency.test', name: 'Отдел продаж', auth_type: 'password', imap_host: 'imap.agency.test', smtp_host: 'smtp.agency.test', password: 'app-password'}, status: 201});
     const now = Date.now();
@@ -108,13 +109,14 @@ test('mail section: folders, read marks, new letters and the «Сообщени�
     await due(-60, adminId, 'Задача админа', foreign);
     await db.prepare("INSERT INTO inbox_leads (pipeline_id,title,contact_name,email) VALUES ((SELECT id FROM pipelines ORDER BY id LIMIT 1),'Заявка с сайта','Иван','ivan@site.test')").run();
     const panel = await call('/api/notifications', {as: member});
-    assert.deepEqual(panel.items.map(item => item.kind).sort(), ['email', 'lead', 'task_due', 'task_overdue']);
+    // A request from the site is not shown to a manager who sees only own deals; full-access employees get it.
+    assert.deepEqual(panel.items.map(item => item.kind).sort(), ['email', 'task_due', 'task_overdue']);
     assert.equal(panel.items.find(item => item.kind === 'task_overdue').text, 'Связаться: Позвонить клиенту');
     assert.equal(panel.items.find(item => item.kind === 'task_due').title, 'Пора выполнить задачу');
     assert.equal(panel.items.find(item => item.kind === 'email').email_id, invoice.id);
     assert.equal(panel.items.find(item => item.kind === 'email').deal_id, mine);
-    assert.equal(panel.unseen, 4);
-    assert.equal((await call('/api/notifications/count', {as: member})).unseen, 4);
+    assert.equal(panel.unseen, 3);
+    assert.equal((await call('/api/notifications/count', {as: member})).unseen, 3);
     await call('/api/notifications/seen', {method: 'POST', as: member});
     assert.equal((await call('/api/notifications/count', {as: member})).unseen, 0, 'everything is seen once the panel was opened');
     assert.ok((await call('/api/notifications', {as: member})).items.every(item => !item.new));
@@ -137,7 +139,19 @@ test('mail section: folders, read marks, new letters and the «Сообщени�
     await call('/api/mail/send', {method: 'POST', body: {mailbox_id: mailbox.id, to: [], subject: 'КП', text: 'x'}, status: 400});
     await call('/api/mail/send', {method: 'POST', body: {mailbox_id: mailbox.id, to: ['client@acme.test'], subject: 'КП', text: ' '}, status: 400});
     await call('/api/mail/send', {method: 'POST', body: {mailbox_id: 999, to: ['client@acme.test'], subject: 'КП', text: 'x'}, status: 400});
-    const fromMember = await call('/api/mail/send', {method: 'POST', body: {mailbox_id: mailbox.id, to: ['client@acme.test'], subject: 'От менеджера', text: 'Добрый день', deal_id: mine}, as: member, status: 201});
+    // A manager writes only from the mailboxes an administrator gave them (or the one with their own e-mail).
+    const memberLetter = {mailbox_id: mailbox.id, to: ['client@acme.test'], subject: 'От менеджера', text: 'Добрый день', deal_id: mine};
+    assert.match((await call('/api/mail/send', {method: 'POST', body: memberLetter, as: member, status: 403})).error, /Нет доступа к этому ящику/);
+    assert.deepEqual((await call('/api/mail/summary', {as: member})).send_mailboxes, []);
+    await call(`/api/mail/emails/${invoice.id}/reply`, {method: 'POST', body: {text: 'x'}, as: member, status: 403});
+    await call(`/api/mail/mailboxes/${mailbox.id}`, {method: 'PATCH', body: {user_ids: [999999]}, status: 400});
+    const granted = await call(`/api/mail/mailboxes/${mailbox.id}`, {method: 'PATCH', body: {user_ids: [memberId]}});
+    assert.deepEqual(granted.user_ids, [Number(memberId)]);
+    assert.deepEqual((await call('/api/mail/summary', {as: member})).send_mailboxes.map(item => item.email), ['sales@agency.test']);
+    // At most 10 addresses in one letter, the copy included.
+    const many = Array.from({length: 6}, (_, index) => `person${index}@acme.test`);
+    assert.match((await call('/api/mail/send', {method: 'POST', body: {...memberLetter, to: many, cc: many.map(address => address.replace('person', 'copy'))}, as: member, status: 400})).error, /Не больше 10 получателей/);
+    const fromMember = await call('/api/mail/send', {method: 'POST', body: memberLetter, as: member, status: 201});
     assert.equal(fromMember.author, 'Менеджер');
     assert.ok((await call(`/api/deals/${mine}`, {as: member})).emails.some(item => item.subject === 'От менеджера'));
     // Reply from the section.
@@ -145,6 +159,13 @@ test('mail section: folders, read marks, new letters and the «Сообщени�
     assert.equal(answer.deal_id, mine);
     assert.equal(sent.at(-1).inReplyTo, '<a1@acme.test>');
     await call(`/api/mail/emails/${spam.id}/reply`, {method: 'POST', body: {text: 'x'}, as: member, status: 404});
+    // Refused letters are not counted; with MAIL_SEND_PER_HOUR=5 the manager has three letters left this hour.
+    for (let index = 0; index < 3; index++) await call('/api/mail/send', {method: 'POST', body: {...memberLetter, subject: `Письмо ${index}`}, as: member, status: 201});
+    assert.match((await call('/api/mail/send', {method: 'POST', body: memberLetter, as: member, status: 429})).error, /не больше 5 в час/);
+    await call('/api/mail/send', {method: 'POST', body: {...memberLetter, deal_id: undefined}, status: 201});
+    // Without the mailbox the manager is back to no sending at all.
+    await call(`/api/mail/mailboxes/${mailbox.id}`, {method: 'PATCH', body: {user_ids: []}});
+    await call(`/api/mail/emails/${invoice.id}/reply`, {method: 'POST', body: {text: 'x'}, as: member, status: 403});
     await call('/api/mail/read-all', {method: 'POST'});
     assert.equal((await call('/api/mail/summary')).unread, 0);
   } finally {

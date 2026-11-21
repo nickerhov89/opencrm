@@ -187,6 +187,14 @@ test('account lifecycle, 2FA, default rights, audit log, quotas and purge',async
     assert.notEqual(acceptedDeal.contact_id,hiddenContact);
     assert.notEqual(acceptedDeal.company_id,hiddenCompany);
     assert.ok(!JSON.stringify((await call('/deals/'+accepted.data.deal_id,{cookie:scoped})).data).includes('Hidden'));
+    // An employee with own access sees only the leads they added or handled: someone else's lead is hidden and cannot be accepted.
+    const foreignLead=(await call('/inbox',{method:'POST',cookie:admin,body:{pipeline_id:pipeline.id,title:'Foreign lead',contact_name:'Someone'}})).data.id;
+    const scopedInbox=(await call('/inbox?pipeline_id='+pipeline.id+'&state=all',{cookie:scoped})).data;
+    assert.ok(!scopedInbox.some(item=>item.id===foreignLead),'a foreign lead is hidden');
+    assert.ok(scopedInbox.some(item=>item.id===probeLead),'the own lead stays visible');
+    assert.equal((await call(`/inbox/${foreignLead}/accept`,{method:'POST',cookie:scoped,body:{stage_id:(await call('/stages?pipeline_id='+pipeline.id,{cookie:admin})).data[0].id}})).status,404);
+    assert.equal((await call(`/inbox/${foreignLead}/reject`,{method:'POST',cookie:scoped})).status,404);
+    assert.ok((await call('/inbox?pipeline_id='+pipeline.id,{cookie:admin})).data.some(item=>item.id===foreignLead));
 
     // CSV import size is capped.
     process.env.IMPORT_MAX_ROWS='3';

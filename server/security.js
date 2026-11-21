@@ -90,6 +90,8 @@ export function createRateLimiter({ windowMs, limit, maxEntries = 50000 }) {
       }
       return 0;
     },
+    // Takes back the last counted action of a key (it failed before doing anything).
+    refund(key) { const recent = hits.get(key); if (recent?.length) recent.pop(); },
     clear() { hits.clear(); }
   };
 }

@@ -71,8 +71,13 @@ test('плагины: установка, настройки, приём зая�
     assert.deepEqual((await request('/admin/plugins')).plugins, []);
     assert.deepEqual(await request('/plugins'), []);
 
+    // Uploading server code needs the administrator's password again.
+    assert.match((await request('/admin/plugins', 'POST', zipOf('tilda-forms'), 403, {'Content-Type': 'application/zip'})).error, /пароль/i);
+    await request('/admin/plugins', 'POST', zipOf('tilda-forms'), 403, {'Content-Type': 'application/zip', 'X-Confirm-Password': 'wrong-password'});
+    assert.deepEqual((await request('/admin/plugins')).plugins, []);
+
     // Install Tilda from a ZIP: it starts switched off.
-    const tilda = await request('/admin/plugins', 'POST', zipOf('tilda-forms'), 201, {'Content-Type': 'application/zip'});
+    const tilda = await request('/admin/plugins', 'POST', zipOf('tilda-forms'), 201, {'Content-Type': 'application/zip', 'X-Confirm-Password': 'passphrase-for-tests'});
     assert.equal(tilda.status, 'disabled');
     assert.equal(tilda.endpoints[0].url, '/api/plugins/tilda-forms/public/hook');
     await request('/plugins/tilda-forms/public/hook', 'POST', 'test=test', 404, {'Content-Type': 'application/x-www-form-urlencoded'});
@@ -110,7 +115,7 @@ test('плагины: установка, настройки, приём зая�
     cookie = savedCookie;
 
     // A plugin with a browser part, its own API and event handlers.
-    await request('/admin/plugins', 'POST', zipOf('hello-world'), 201, {'Content-Type': 'application/zip'});
+    await request('/admin/plugins', 'POST', zipOf('hello-world'), 201, {'Content-Type': 'application/zip', 'X-Confirm-Password': 'passphrase-for-tests'});
     await request('/admin/plugins/hello-world', 'PATCH', {settings: {logStages: true}});
     state = await request('/admin/plugins/hello-world', 'PATCH', {enabled: true});
     assert.equal(state.status, 'active');
@@ -147,28 +152,28 @@ test('плагины: установка, настройки, приём зая�
     cookie = '';
     await request('/login', 'POST', {email: 'member@example.test', password: 'member-password'});
     await request('/admin/plugins', 'GET', undefined, 403);
-    await request('/admin/plugins', 'POST', zipOf('hello-world'), 403, {'Content-Type': 'application/zip'});
+    await request('/admin/plugins', 'POST', zipOf('hello-world'), 403, {'Content-Type': 'application/zip', 'X-Confirm-Password': 'passphrase-for-tests'});
     assert.equal((await request('/plugins')).length, 1);
     cookie = adminCookie;
 
     // Broken packages are refused and leave the installed copy alone.
-    await request('/admin/plugins', 'POST', writeZip([{name: 'plugin.json', data: Buffer.from(JSON.stringify({id: 'hello-world', name: 'x', version: '2.0.0', api: 99}))}]), 400, {'Content-Type': 'application/zip'});
-    await request('/admin/plugins', 'POST', writeZip([{name: 'readme.txt', data: Buffer.from('x')}]), 400, {'Content-Type': 'application/zip'});
-    await request('/admin/plugins', 'POST', Buffer.from('nope'), 400, {'Content-Type': 'application/zip'});
+    await request('/admin/plugins', 'POST', writeZip([{name: 'plugin.json', data: Buffer.from(JSON.stringify({id: 'hello-world', name: 'x', version: '2.0.0', api: 99}))}]), 400, {'Content-Type': 'application/zip', 'X-Confirm-Password': 'passphrase-for-tests'});
+    await request('/admin/plugins', 'POST', writeZip([{name: 'readme.txt', data: Buffer.from('x')}]), 400, {'Content-Type': 'application/zip', 'X-Confirm-Password': 'passphrase-for-tests'});
+    await request('/admin/plugins', 'POST', Buffer.from('nope'), 400, {'Content-Type': 'application/zip', 'X-Confirm-Password': 'passphrase-for-tests'});
     assert.equal((await request('/admin/plugins')).plugins.find(item => item.id === 'hello-world').version, '1.0.0');
 
     // An update keeps settings and restarts the plugin.
     const updated = folder('hello-world').map(file => file.name === 'plugin.json' ? {...file, data: Buffer.from(file.data.toString().replace('"1.0.0"', '"1.1.0"'))} : file);
-    const wrong = await request('/admin/plugins?expect=tilda-forms', 'POST', writeZip(updated), 400, {'Content-Type': 'application/zip'});
+    const wrong = await request('/admin/plugins?expect=tilda-forms', 'POST', writeZip(updated), 400, {'Content-Type': 'application/zip', 'X-Confirm-Password': 'passphrase-for-tests'});
     assert.match(wrong.error, /другой плагин/, 'кнопка «Обновить» на странице плагина не ставит чужой архив');
     assert.equal((await request('/admin/plugins')).plugins.find(item => item.id === 'hello-world').version, '1.0.0');
-    state = await request('/admin/plugins?expect=hello-world', 'POST', writeZip(updated), 200, {'Content-Type': 'application/zip'});
+    state = await request('/admin/plugins?expect=hello-world', 'POST', writeZip(updated), 200, {'Content-Type': 'application/zip', 'X-Confirm-Password': 'passphrase-for-tests'});
     assert.equal(state.version, '1.1.0');
     assert.equal(state.status, 'active');
     assert.equal(state.settings.logStages, true);
 
     process.env.OPENCRM_PLUGIN_UPLOAD = '0';
-    await request('/admin/plugins', 'POST', zipOf('hello-world'), 403, {'Content-Type': 'application/zip'});
+    await request('/admin/plugins', 'POST', zipOf('hello-world'), 403, {'Content-Type': 'application/zip', 'X-Confirm-Password': 'passphrase-for-tests'});
     delete process.env.OPENCRM_PLUGIN_UPLOAD;
 
     // Switching off stops routes and event delivery.
