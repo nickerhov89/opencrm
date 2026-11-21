@@ -9,6 +9,7 @@ import { registerIntegrations } from './integrations.js';
 import { registerMail, dealEmails, secretFilePath } from './mail.js';
 import { registerNotifications } from './notifications.js';
 import { registerDistribution, queueDistribution } from './distribution.js';
+import { registerPlugins } from './plugins.js';
 import { createStageRules, RuleError } from './stage-rules.js';
 import { permissionEntities, permissionActions, normalizePermissions, noPermissions, defaultMemberPermissions, securityHeaders, createLoginLimiter, newTotpSecret, verifyTotp, otpauthUrl } from './security.js';
 import {defaultDealCardFields,validDealCardFields} from '../src/deal-card-layout.js';
@@ -982,6 +983,7 @@ registerIntegrations(app,db,{auth,admin,audit,event,entityEvent,logEntityChanges
 registerMail(app,db,{auth,admin,audit,requirePermission,secretFile:secretFilePath(uploadDir)});
 registerNotifications(app,db,{auth});
 registerDistribution(app,db,{auth,admin,audit});
+const plugins=registerPlugins(app,db,{auth,admin,audit,uploadDir,secretFile:secretFilePath(uploadDir)});await plugins.start();
 registerPurge();
 app.use(express.static(resolve(root,'dist')));
 app.get('/{*path}',(req,res) => { if (isApiPath(req.path)) return fail(res,404,'Маршрут не найден'); res.sendFile(resolve(root,'dist/index.html')); });
@@ -1004,4 +1006,4 @@ if (process.env.NODE_ENV !== 'test' && process.env.AMO_BASE_URL && (process.env.
   };
   setTimeout(amoHistory,10000).unref();
 }
-export { app, db };
+export { app, db, plugins };

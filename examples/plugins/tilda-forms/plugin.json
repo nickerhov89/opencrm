@@ -1,0 +1,18 @@
+{
+  "id": "tilda-forms",
+  "name": "Формы Tilda",
+  "version": "1.0.0",
+  "api": 1,
+  "description": "Заявки из форм на сайте Tilda попадают в «Неразобранное» выбранной воронки.",
+  "author": "OpenCRM",
+  "server": "server.js",
+  "settings": [
+    {"key": "token", "label": "Ключ для Tilda", "type": "password", "required": true, "help": "Любая длинная случайная строка. В Tilda: Настройки сайта → Формы → Webhook → API-ключ, имя поля api_key, метод «POST-параметр» или «Header»."},
+    {"key": "pipeline_id", "label": "ID воронки", "type": "number", "help": "Пусто — первая воронка."},
+    {"key": "title", "label": "Название заявки", "type": "text", "default": "Заявка с сайта", "help": "К нему добавляется название формы."},
+    {"key": "source", "label": "Источник", "type": "text", "default": "Tilda"}
+  ],
+  "endpoints": [
+    {"path": "/hook", "label": "Адрес webhook для Tilda"}
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "hello-world",
+  "name": "Пример плагина",
+  "version": "1.0.0",
+  "api": 1,
+  "description": "Показывает все точки расширения: страницу в левом меню, блок в карточке сделки, свой API, события и хранилище.",
+  "author": "OpenCRM",
+  "server": "server.js",
+  "client": "client/index.js",
+  "settings": [
+    {"key": "greeting", "label": "Приветствие", "type": "text", "default": "Привет из плагина!", "public": true},
+    {"key": "logStages", "label": "Писать в ленту сделки о смене этапа", "type": "boolean", "default": false}
+  ]
+}

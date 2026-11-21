@@ -2,7 +2,7 @@ import {appBase, appPath} from './app-base.js';
 
 const sectionPaths={dashboard:'/dashboard',deals:'/deals',tasks:'/tasks',contacts:'/contacts',companies:'/companies',all:'/lists/all',files:'/files',analytics:'/analytics',settings:'/settings',mail:'/mail',inbox:'/inbox','pipeline-settings':'/pipelines/settings'};
 
-export const pathForView=view=>appPath(sectionPaths[view]||'/deals');
+export const pathForView=view=>appPath(String(view).startsWith('plugin:')?`/apps/${String(view).slice(7)}`:sectionPaths[view]||'/deals');
 export const pathForDeal=id=>appPath(`/deals/${Number(id)}`);
 export const pathForEntity=(kind,id)=>appPath(`/${kind==='contact'?'contacts':'companies'}/${Number(id)}`);
 
@@ -13,6 +13,8 @@ export function parseRoute(pathname,search=''){
   const entity=path.match(/^\/(contacts|companies)\/([1-9]\d*)$/);
   if(entity)return {kind:'entity',entityKind:entity[1]==='contacts'?'contact':'company',id:Number(entity[2])};
   if(path==='/deals/all')return {kind:'allDeals'};
+  const plugin=path.match(/^\/apps\/([a-z0-9-]+\/[a-z0-9-]+)$/);
+  if(plugin)return {kind:'view',view:`plugin:${plugin[1]}`};
   if(path==='/'||path==='/deals')return {kind:'view',view:'deals',pipelineId:Number(new URLSearchParams(search).get('pipeline'))||null};
   const view=Object.entries(sectionPaths).find(([,value])=>value===path)?.[0];
   return view?{kind:'view',view}:{kind:'unknown'};

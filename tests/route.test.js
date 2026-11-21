@@ -13,4 +13,7 @@ test('routes resolve cards and sections from shareable URLs',()=>{
   assert.equal(pathForDeal(42),'/deals/42');
   assert.equal(pathForEntity('contact',7),'/contacts/7');
   assert.equal(pathForView('settings'),'/settings');
+  assert.deepEqual(parseRoute('/apps/tilda-forms/stats'),{kind:'view',view:'plugin:tilda-forms/stats'});
+  assert.equal(pathForView('plugin:tilda-forms/stats'),'/apps/tilda-forms/stats');
+  assert.deepEqual(parseRoute('/apps/../x'),{kind:'unknown'});
 });
