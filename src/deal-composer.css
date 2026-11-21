@@ -1,4 +1,5 @@
-.deal-compose{display:flex;flex-direction:column;align-items:stretch;gap:8px}
+/* .note-compose (style.css) is a row aligned to the bottom and is loaded later; the composer is a column. */
+.note-compose.deal-compose{display:flex;flex-direction:column;align-items:stretch;gap:8px}
 .deal-compose-modes{display:flex;gap:4px;flex-wrap:wrap}
 .deal-compose-modes button{border:0;background:transparent;color:#86939d;font-size:11px;padding:5px 8px;border-radius:2px}
 .deal-compose-modes button.active{background:#e9f2fb;color:#427eaf;font-weight:700}

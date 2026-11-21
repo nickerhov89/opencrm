@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — deal feed
+
+- System events in the deal feed are one line each, as in amoCRM: «Сегодня 11:29 Аналитика  Поле … » with the contact or company at the right, a thin line between events; a fold of events («Изменение поля: 3 события · Развернуть») opens the same lines.
+- The note composer under the feed takes the full width again (the shared `.note-compose` style, loaded later, had pushed it into the bottom right corner).
+
 ## Unreleased — dark theme
 
 - Dark theme in the style of amoCRM (blue-black surfaces, light text): «Тема» at the bottom of the left menu and Settings → General offer «Авто» (follows the system), «Светлая», «Тёмная». The choice is saved per employee (`PUT /api/me/theme`, `theme` in `/api/me`) and in the browser, applied before the first paint, and switches with a circle spreading from the button.
