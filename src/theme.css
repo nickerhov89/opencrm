@@ -1,0 +1,35 @@
+/* Theme switching. Dark colors for the rest of the app are generated at build time
+   (scripts/dark-theme.mjs); this file holds the switcher and the few hand-tuned dark spots. */
+:root{color-scheme:light}
+:root[data-theme=dark]{color-scheme:dark}
+::view-transition-old(root),::view-transition-new(root){animation:none;mix-blend-mode:normal}
+
+.side-theme{position:relative;width:100%}
+.side-theme-button{border:0;background:none;color:#9babb8;height:58px;width:100%;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:5px;padding:4px}
+.side-theme-button span{font-size:9.5px}
+.side-theme-button:hover,.side-theme-button.active{background:#304959;color:#fff}
+.theme-popover{position:fixed;z-index:60;background:#fff;border:1px solid #dce1e5;border-radius:8px;box-shadow:0 10px 30px #14283933;padding:12px;width:268px;animation:theme-pop .14s ease-out}
+.theme-popover strong{display:block;font-size:11px;letter-spacing:.3px;text-transform:uppercase;color:#8d979e;margin:0 2px 10px}
+@keyframes theme-pop{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:none}}
+
+.theme-choice{display:inline-grid;grid-template-columns:repeat(3,1fr);gap:4px;background:#eef1f4;border-radius:7px;padding:3px}
+.theme-choice button{border:0;background:none;border-radius:5px;color:#5f6b74;font-size:12px;display:flex;align-items:center;justify-content:center;gap:6px;height:32px;padding:0 12px;white-space:nowrap;transition:background .15s,color .15s}
+.theme-choice button:hover{color:#2f6fae}
+.theme-choice button.active{background:#fff;color:#2f6fae;box-shadow:0 1px 3px #14283926;font-weight:600}
+.theme-choice button:focus-visible{outline:2px solid #5b91e5;outline-offset:1px}
+.theme-choice.compact{display:grid;width:100%}
+.theme-choice.compact button{flex-direction:column;height:58px;gap:4px;font-size:11px;padding:0 6px}
+
+@media(max-width:760px){
+  .side-theme-button{height:54px}
+}
+
+/* Hand-tuned dark spots. Stage colors come from the database and stay pastel (as in amoCRM),
+   so text placed on them stays dark. */
+:root[data-theme=dark] .task-stage{color:#1b2a36}
+:root[data-theme=dark] .theme-popover{background:#163043;border-color:#2a4356;box-shadow:0 12px 32px #000a}
+/* Fields and buttons that rely on browser defaults: with color-scheme:dark the browser paints them grey.
+   :where() keeps this at zero specificity, so any generated dark rule still wins. */
+:where(:root[data-theme=dark]) :where(input:not([type=checkbox],[type=radio],[type=range],[type=color]),textarea,select){background-color:#0f2231;color:#e7ebee}
+:where(:root[data-theme=dark]) :where(button){background-color:#1d3549;color:inherit}
+:where(:root[data-theme=dark]) ::placeholder{color:#6f7f96}

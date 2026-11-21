@@ -1,4 +1,5 @@
-import React from 'react';
+import React, {useEffect} from 'react';
+import {forceLightTheme} from './theme.js';
 import {appPath} from './app-base.js';
 import portrait from './assets/hero-nikita-logo.png';
 import board from './assets/board-preview.png';
@@ -11,6 +12,7 @@ const features = [
 ];
 
 export default function LandingPage() {
+  useEffect(() => forceLightTheme(), []);
   const dealsPath = appPath('/deals');
   return <main id="opencrm-landing" className={styles.page}>
     <section className={styles.hero} aria-labelledby="opencrm-title">

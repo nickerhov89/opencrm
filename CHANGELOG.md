@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — dark theme
+
+- Dark theme in the style of amoCRM (blue-black surfaces, light text): «Тема» at the bottom of the left menu and Settings → General offer «Авто» (follows the system), «Светлая», «Тёмная». The choice is saved per employee (`PUT /api/me/theme`, `theme` in `/api/me`) and in the browser, applied before the first paint, and switches with a circle spreading from the button.
+- The light styles are unchanged: at build time every CSS rule that sets a color gets a dark twin under `:root[data-theme=dark]` (`scripts/dark-theme.mjs`), so new styles get the dark theme without extra work. The landing page and public forms stay light.
+
 ## Unreleased — plugins
 
 - Plugins extend OpenCRM without changing its code: a ZIP with `plugin.json`, an optional server module and an optional browser module. Admins upload, configure, enable, update and delete them in Settings → Plugins; every action is in the security log. `OPENCRM_PLUGIN_UPLOAD=0` turns uploads off, `npm run plugin -- pack|install|list|enable|disable` works on the server.

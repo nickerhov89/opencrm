@@ -1,8 +1,10 @@
 import React,{useEffect,useState} from 'react';
+import {forceLightTheme} from './theme.js';
 import {CheckCircle2,Send} from 'lucide-react';
 import './public-form.css';
 
 export default function PublicLeadForm({api,token}){
+  useEffect(()=>forceLightTheme(),[]);
   const [title,setTitle]=useState(''),[loading,setLoading]=useState(true),[error,setError]=useState(''),[sent,setSent]=useState(false),[busy,setBusy]=useState(false);
   const [form,setForm]=useState({title:'',contact_name:'',company_name:'',phone:'',email:'',website:'',message:'',website_hidden:''});
   useEffect(()=>{api('/public/forms/'+token).then(x=>{setTitle(x.title);setLoading(false)}).catch(err=>{setError(err.message);setLoading(false)})},[token]);
