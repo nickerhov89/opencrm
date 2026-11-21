@@ -165,7 +165,7 @@ test('mail: mailboxes sync, letters link to deals, replies keep the thread', asy
     assert.equal(rows['<old@acme.test>'], undefined);
     assert.equal(rows['<d1@agency.test>'], undefined, 'drafts are skipped');
     assert.deepEqual(rows['<m1@acme.test>'], {message_id: '<m1@acme.test>', deal_id: openDeal, linked_by: 'address', direction: 'incoming'}, 'the open deal wins over a more recent closed one');
-    assert.deepEqual(rows['<f1@mailer.test>'], {message_id: '<f1@mailer.test>', deal_id: openDeal, linked_by: 'address', direction: 'incoming'}, 'the client in To links the outreach letter');
+    assert.deepEqual(rows['<f1@mailer.test>'], {message_id: '<f1@mailer.test>', deal_id: openDeal, linked_by: 'address', direction: 'outgoing'}, 'the client in To links the outreach letter; it comes from our mailer box, so it is outgoing');
     assert.deepEqual(rows['<r1@agency.test>'], {message_id: '<r1@agency.test>', deal_id: openDeal, linked_by: 'thread', direction: 'outgoing'}, 'the reply to the mailer box links by thread');
     assert.equal(rows['<n1@spam.test>'].deal_id, null, 'letters without a deal are kept');
     assert.equal(rows['<h1@acme2.test>'].deal_id, secondDeal, 'one of several contact addresses; a closed deal when there is no open one');
@@ -271,11 +271,36 @@ test('mail: mailboxes sync, letters link to deals, replies keep the thread', asy
     await call(`/api/deals/${openDeal}/emails`, {as: member, status: 403});
     await call(`/api/deals/${openDeal}/emails/${outreach.id}/reply`, {method: 'POST', as: member, body: {text: 'x'}, status: 403});
 
+    // Direction inside a deal: the client (its address, or its domain unless it is a free mail service)
+    // writes in; everyone else is ours. Threads with incomplete References link by subject.
+    const {letterDirection, subjectKey} = await import('../server/mail.js');
+    assert.equal(subjectKey('Re: Fwd: [#AB12CD34] Предложение  по CRM'), 'предложение по crm');
+    assert.equal(subjectKey('Ответ: RE[2]: Тема'), 'тема');
+    const buyer = await contact('Покупатель', 'buyer@gmail.com');
+    const gmailDeal = await deal('Gmail', active, buyer, '2026-11-01 10:00:00');
+    assert.equal(await letterDirection(db, {from_address: 'buyer@gmail.com'}, gmailDeal, new Set()), 'incoming');
+    assert.equal(await letterDirection(db, {from_address: 'someone@gmail.com'}, gmailDeal, new Set()), 'outgoing', 'a free mail domain does not make a stranger the client');
+    assert.equal(await letterDirection(db, {from_address: 'news@spam.test'}, null, new Set()), 'incoming', 'without a deal only our mailboxes are outgoing');
+    const sync = `/api/mail/mailboxes/${mailbox.id}/sync?wait=1`;
+    imap.folders[1].messages.push(
+      {uid: 19, date: new Date(), source: letter({from: 'Коллега <colleague@acme.test>', to: 'polza@agency.test', subject: 'Re: Вопрос', id: '<c1@acme.test>', inReplyTo: '<m1@acme.test>', references: '<m1@acme.test>', date: new Date()})},
+      {uid: 20, date: new Date(), source: letter({from: 'polza@agency.test', to: 'outreach@mailer.test', subject: 'RE: [#AB12CD34] Предложение', id: '<s1@agency.test>', date: new Date()})},
+    );
+    assert.deepEqual(await call(sync, {method: 'POST'}), {added: 2, relinked: 0});
+    const stored1 = id => db.prepare('SELECT deal_id,linked_by,direction FROM emails WHERE message_id=?').get(id);
+    assert.deepEqual(await stored1('<c1@acme.test>'), {deal_id: lostDeal, linked_by: 'thread', direction: 'incoming'}, 'a colleague on the client domain writes in');
+    assert.deepEqual(await stored1('<s1@agency.test>'), {deal_id: openDeal, linked_by: 'subject', direction: 'outgoing'}, 'no References: same subject with the same correspondent');
+    // The same subject with the same mailer box in two deals is ambiguous: the letter stays unlinked.
+    await db.prepare("INSERT INTO emails (deal_id,linked_by,direction,message_id,from_address,to_json,subject,subject_key,sent_at) VALUES (?,'address','outgoing','<f2@mailer.test>','outreach@mailer.test','[{\"address\":\"other@one.test\",\"name\":\"\"}]','Предложение','предложение',?)").run(secondDeal, new Date().toISOString().slice(0, 19).replace('T', ' '));
+    imap.folders[1].messages.push({uid: 21, date: new Date(), source: letter({from: 'polza@agency.test', to: 'outreach@mailer.test', subject: 'Re: Предложение', id: '<s2@agency.test>', date: new Date()})});
+    assert.deepEqual(await call(sync, {method: 'POST'}), {added: 1, relinked: 0});
+    assert.deepEqual(await stored1('<s2@agency.test>'), {deal_id: null, linked_by: '', direction: 'outgoing'});
+
     // Turning a mailbox off stops replies; deleting it keeps the letters in their deals.
     await call(`/api/mail/mailboxes/${mailbox.id}`, {method: 'PATCH', body: {enabled: false}});
     assert.match((await call(`/api/deals/${openDeal}/emails/${outreach.id}/reply`, {method: 'POST', body: {text: 'x'}, status: 409})).error, /выключен/);
     await call(`/api/mail/mailboxes/${mailbox.id}`, {method: 'DELETE'});
-    assert.equal((await call(`/api/deals/${openDeal}/emails`)).length, 7, 'the letters stay after the mailbox is deleted');
+    assert.equal((await call(`/api/deals/${openDeal}/emails`)).length, 8, 'the letters stay after the mailbox is deleted');
     assert.match((await call(`/api/deals/${openDeal}/emails/${outreach.id}/reply`, {method: 'POST', body: {text: 'x'}, status: 409})).error, /отключён/);
     assert.ok(await db.prepare("SELECT 1 FROM audit_log WHERE action='email.sent'").get());
 

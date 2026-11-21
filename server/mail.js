@@ -11,12 +11,10 @@
 import {createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, sign} from 'node:crypto';
 import {mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {dirname} from 'node:path';
-import {ImapFlow} from 'imapflow';
-import nodemailer from 'nodemailer';
-import mailparser from 'mailparser';
-import {convert as htmlToText} from 'html-to-text';
 
-const {simpleParser} = mailparser;
+// The mail libraries load on first use, so they do not slow down the start of the server.
+let libraries;
+const mailLibraries = async () => libraries ??= {ImapFlow: (await import('imapflow')).ImapFlow, nodemailer: (await import('nodemailer')).default, simpleParser: (await import('mailparser')).default.simpleParser, htmlToText: (await import('html-to-text')).convert};
 const googleTokenUrl = 'https://oauth2.googleapis.com/token';
 const googleServers = {imap_host: 'imap.gmail.com', imap_port: 993, smtp_host: 'smtp.gmail.com', smtp_port: 465};
 const maxSource = 2 * 1024 * 1024;   // bytes of a letter read for headers and text; attachments come from BODYSTRUCTURE
@@ -26,8 +24,8 @@ const fetchChunk = 20;
 
 // Tests replace these to run without real servers.
 export const mailHooks = {
-  imapClient: options => new ImapFlow(options),
-  smtpTransport: options => nodemailer.createTransport(options),
+  imapClient: async options => new (await mailLibraries()).ImapFlow(options),
+  smtpTransport: async options => (await mailLibraries()).nodemailer.createTransport(options),
   fetch: (...args) => fetch(...args),
 };
 
@@ -135,6 +133,7 @@ function structureAttachments(node, out = []) {
 const cleanText = text => String(text || '').replace(/\r\n?/g, '\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 
 export async function parseMessage(source, {mailboxEmail, uid, folder, mailboxId, validity, internalDate, bodyStructure}) {
+  const {simpleParser, htmlToText} = await mailLibraries();
   const parsed = await simpleParser(source, {skipImageLinks: true, skipTextToHtml: true, skipTextLinks: true});
   const from = addresses(parsed.from)[0] || {address: '', name: ''};
   const text = parsed.text?.trim() ? parsed.text : parsed.html ? htmlToText(parsed.html, {wordwrap: false, selectors: [{selector: 'img', format: 'skip'}, {selector: 'a', options: {ignoreHref: true}}]}) : '';
@@ -164,6 +163,30 @@ async function knownAddresses(db) {
   const rows = await db.prepare("SELECT email FROM contacts WHERE deleted_at IS NULL AND email<>'' UNION ALL SELECT email FROM companies WHERE deleted_at IS NULL AND email<>''").all();
   return new Set(rows.flatMap(row => lower(row.email).split(/[,;\s]+/)).filter(Boolean));
 }
+// Subject without Re:/Fwd: prefixes and Instantly-style [#XXXXXXXX] tags, for the subject rule.
+export function subjectKey(subject) {
+  let text = String(subject || '').replace(/\[#[^\]\s]{1,40}\]/g, ' '), previous;
+  do { previous = text; text = text.replace(/^\s*(re|fwd?|aw|wg|ответ|отв|пересл|переслано)\s*(\[\d+\]|\(\d+\))?\s*:\s*/i, ''); } while (text !== previous);
+  return text.replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 300);
+}
+const participants = (letter, own) => [...new Set([letter.from_address, letter.reply_to, ...letter.to.map(item => item.address), ...letter.cc.map(item => item.address)].map(lower))].filter(address => address && !own.has(address));
+// Free mail services: only the exact address of a contact counts there, not the whole domain.
+const publicDomains = new Set(['gmail.com', 'googlemail.com', 'mail.ru', 'bk.ru', 'list.ru', 'inbox.ru', 'internet.ru', 'yandex.ru', 'ya.ru', 'yandex.com', 'yandex.by', 'yandex.kz', 'yandex.ua', 'narod.ru', 'rambler.ru', 'lenta.ru', 'outlook.com', 'hotmail.com', 'live.com', 'msn.com', 'icloud.com', 'me.com', 'mac.com', 'yahoo.com', 'aol.com', 'proton.me', 'protonmail.com', 'gmx.com', 'gmx.de', 'gmx.net', 'zoho.com', 'mail.com', 'ukr.net', 'tut.by', 'qq.com', '163.com']);
+const domainOf = address => lower(address).split('@')[1] || '';
+// A letter of a deal is incoming when it comes from the deal's client: the e-mail of its contact or
+// company, or another address on the same (non-public) domain. Everything else is ours: connected
+// mailboxes, outreach mailboxes, managers. Without a deal only connected mailboxes count as ours.
+export async function letterDirection(db, letter, dealId, own) {
+  const from = lower(letter.from_address);
+  if (own.has(from)) return 'outgoing';
+  if (!dealId) return 'incoming';
+  const rows = await db.prepare(`SELECT c.email FROM contacts c WHERE c.deleted_at IS NULL AND (c.id IN (SELECT dc.contact_id FROM deal_contacts dc WHERE dc.deal_id=?) OR c.id=(SELECT d.contact_id FROM deals d WHERE d.id=?))
+    UNION ALL SELECT co.email FROM companies co JOIN deals d ON d.company_id=co.id WHERE d.id=? AND co.deleted_at IS NULL`).all(dealId, dealId, dealId);
+  const client = new Set(rows.flatMap(row => lower(row.email).split(/[,;\s]+/)).filter(address => address.includes('@')));
+  if (client.has(from)) return 'incoming';
+  const domain = domainOf(from);
+  return domain && !publicDomains.has(domain) && [...client].some(address => domainOf(address) === domain) ? 'incoming' : 'outgoing';
+}
 const emailListSql = column => `string_to_array(regexp_replace(lower(${column}),'[;\\s]+',',','g'),',')`;
 export async function findDeal(db, letter, {own, known}) {
   const refs = [...new Set([letter.in_reply_to, ...(letter.references || [])].filter(Boolean))];
@@ -171,8 +194,8 @@ export async function findDeal(db, letter, {own, known}) {
     const parent = await db.prepare(`SELECT e.deal_id FROM emails e JOIN deals d ON d.id=e.deal_id WHERE d.deleted_at IS NULL AND e.message_id IN (${refs.map(() => '?').join(',')}) ORDER BY e.sent_at DESC,e.id DESC LIMIT 1`).get(...refs);
     if (parent) return {deal_id: parent.deal_id, linked_by: 'thread'};
   }
-  const people = [...new Set([letter.from_address, letter.reply_to, ...letter.to.map(item => item.address), ...letter.cc.map(item => item.address)].map(lower))].filter(address => address && !own.has(address) && (!known || known.has(address)));
-  if (!people.length) return null;
+  const people = participants(letter, own).filter(address => !known || known.has(address));
+  if (!people.length) return await bySubject(db, letter, own);
   const list = `ARRAY[${people.map(() => '?').join(',')}]::text[]`;
   const deal = await db.prepare(`SELECT d.id,
       CASE WHEN EXISTS(SELECT 1 FROM contacts c WHERE c.deleted_at IS NULL AND (c.id=d.contact_id OR c.id IN (SELECT dc.contact_id FROM deal_contacts dc WHERE dc.deal_id=d.id)) AND ${emailListSql('c.email')} && ${list}) THEN 1 ELSE 0 END by_contact
@@ -181,12 +204,22 @@ export async function findDeal(db, letter, {own, known}) {
       EXISTS(SELECT 1 FROM contacts c WHERE c.deleted_at IS NULL AND (c.id=d.contact_id OR c.id IN (SELECT dc.contact_id FROM deal_contacts dc WHERE dc.deal_id=d.id)) AND ${emailListSql('c.email')} && ${list})
       OR EXISTS(SELECT 1 FROM companies co WHERE co.deleted_at IS NULL AND co.id=d.company_id AND ${emailListSql('co.email')} && ${list}))
     ORDER BY by_contact DESC, CASE WHEN s.kind='active' THEN 0 ELSE 1 END, d.updated_at DESC, d.id DESC LIMIT 1`).get(...people, ...people, ...people);
-  return deal ? {deal_id: deal.id, linked_by: 'address'} : null;
+  return deal ? {deal_id: deal.id, linked_by: 'address'} : await bySubject(db, letter, own);
+}
+// Last resort for threads with incomplete References (Instantly): the same subject with the same
+// correspondent within 60 days. Only when all such letters point to one deal.
+async function bySubject(db, letter, own) {
+  const key = letter.subject_key ?? subjectKey(letter.subject), partners = participants(letter, own);
+  if (key.length < 3 || !partners.length) return null;
+  const at = Date.parse(String(letter.sent_at || '').replace(' ', 'T') + 'Z'), since = stamp(new Date((Number.isFinite(at) ? at : Date.now()) - 60 * 864e5));
+  const rows = await db.prepare('SELECT e.deal_id,e.from_address,e.reply_to,e.to_json,e.cc_json FROM emails e JOIN deals d ON d.id=e.deal_id WHERE d.deleted_at IS NULL AND e.subject_key=? AND e.sent_at>=? AND e.message_id<>? ORDER BY e.sent_at DESC LIMIT 500').all(key, since, letter.message_id || '');
+  const deals = new Set(rows.filter(row => participants({from_address: row.from_address, reply_to: row.reply_to, to: json(row.to_json, []), cc: json(row.cc_json, [])}, own).some(address => partners.includes(address))).map(row => row.deal_id));
+  return deals.size === 1 ? {deal_id: [...deals][0], linked_by: 'subject'} : null;
 }
 
 async function storeLetter(db, letter, {mailboxId, userId = null, dealId, linkedBy}) {
-  const result = await db.prepare(`INSERT INTO emails (mailbox_id,deal_id,linked_by,direction,message_id,in_reply_to,references_json,from_address,from_name,reply_to,to_json,cc_json,subject,body,attachments_json,sent_at,user_id,folder,uid)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (message_id) DO NOTHING`).run(mailboxId, dealId ?? null, dealId ? linkedBy : '', letter.direction, letter.message_id, letter.in_reply_to, JSON.stringify(letter.references), letter.from_address, letter.from_name, letter.reply_to, JSON.stringify(letter.to), JSON.stringify(letter.cc), letter.subject, letter.body, JSON.stringify(letter.attachments), letter.sent_at, userId, letter.folder || '', letter.uid ?? null);
+  const result = await db.prepare(`INSERT INTO emails (mailbox_id,deal_id,linked_by,direction,message_id,in_reply_to,references_json,from_address,from_name,reply_to,to_json,cc_json,subject,subject_key,body,attachments_json,sent_at,user_id,folder,uid)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (message_id) DO NOTHING`).run(mailboxId, dealId ?? null, dealId ? linkedBy : '', letter.direction, letter.message_id, letter.in_reply_to, JSON.stringify(letter.references), letter.from_address, letter.from_name, letter.reply_to, JSON.stringify(letter.to), JSON.stringify(letter.cc), letter.subject, subjectKey(letter.subject), letter.body, JSON.stringify(letter.attachments), letter.sent_at, userId, letter.folder || '', letter.uid ?? null);
   return result.changes;
 }
 
@@ -194,17 +227,18 @@ async function storeLetter(db, letter, {mailboxId, userId = null, dealId, linked
 // later letter of the same thread may have found its deal.
 export async function relinkUnlinked(db, {days = 60, now = Date.now} = {}) {
   const since = stamp(new Date(now() - days * 864e5)), own = await connectedAddresses(db), known = await knownAddresses(db);
-  const rows = await db.prepare('SELECT id,from_address,reply_to,to_json,cc_json,in_reply_to,references_json FROM emails WHERE deal_id IS NULL AND sent_at>=? ORDER BY sent_at,id LIMIT 20000').all(since);
+  const rows = await db.prepare('SELECT id,message_id,from_address,reply_to,to_json,cc_json,in_reply_to,references_json,subject_key,sent_at FROM emails WHERE deal_id IS NULL AND sent_at>=? ORDER BY sent_at,id LIMIT 20000').all(since);
+  const linkedSubjects = new Set((await db.prepare("SELECT DISTINCT e.subject_key FROM emails e WHERE e.deal_id IS NOT NULL AND e.subject_key<>'' AND e.subject_key IN (SELECT u.subject_key FROM emails u WHERE u.deal_id IS NULL AND u.sent_at>=?)").all(since)).map(row => row.subject_key));
   const threadParents = new Set((await db.prepare(`SELECT p.message_id FROM emails p JOIN deals d ON d.id=p.deal_id WHERE d.deleted_at IS NULL AND p.message_id IN (SELECT e.in_reply_to FROM emails e WHERE e.deal_id IS NULL AND e.sent_at>=? UNION SELECT jsonb_array_elements_text(e.references_json::jsonb) FROM emails e WHERE e.deal_id IS NULL AND e.sent_at>=?)`).all(since, since)).map(row => row.message_id));
   let linked = 0;
   for (const row of rows) {
-    const letter = {from_address: row.from_address, reply_to: row.reply_to, to: json(row.to_json, []), cc: json(row.cc_json, []), in_reply_to: row.in_reply_to, references: json(row.references_json, [])};
+    const letter = {message_id: row.message_id, from_address: row.from_address, reply_to: row.reply_to, to: json(row.to_json, []), cc: json(row.cc_json, []), in_reply_to: row.in_reply_to, references: json(row.references_json, []), subject_key: row.subject_key, sent_at: row.sent_at};
     const thread = [letter.in_reply_to, ...letter.references].some(id => threadParents.has(id));
     const people = [letter.from_address, letter.reply_to, ...letter.to.map(item => item.address), ...letter.cc.map(item => item.address)].some(address => address && !own.has(address) && known.has(address));
-    if (!thread && !people) continue;
+    if (!thread && !people && !linkedSubjects.has(row.subject_key)) continue;
     const found = await findDeal(db, letter, {own, known});
     if (!found) continue;
-    linked += (await db.prepare('UPDATE emails SET deal_id=?,linked_by=? WHERE id=? AND deal_id IS NULL').run(found.deal_id, found.linked_by, row.id)).changes;
+    linked += (await db.prepare('UPDATE emails SET deal_id=?,linked_by=?,direction=? WHERE id=? AND deal_id IS NULL').run(found.deal_id, found.linked_by, await letterDirection(db, letter, found.deal_id, own), row.id)).changes;
   }
   return linked;
 }
@@ -229,7 +263,7 @@ export async function syncMailbox(db, box, id, {now = Date.now} = {}) {
     const state = json(mailbox.sync_state, {}), own = await connectedAddresses(db), known = await knownAddresses(db);
     let added = 0;
     try {
-      client = mailHooks.imapClient(await imapOptions(mailbox, box.open(mailbox.secret)));
+      client = await mailHooks.imapClient(await imapOptions(mailbox, box.open(mailbox.secret)));
       await client.connect();
       for (const path of await syncFolders(client)) {
         const lock = await client.getMailboxLock(path);
@@ -251,8 +285,8 @@ export async function syncMailbox(db, box, id, {now = Date.now} = {}) {
               if (message.flags?.has?.('\\Draft') || !message.source) continue;
               const letter = await parseMessage(message.source, {mailboxEmail: mailbox.email, uid: message.uid, folder: path, mailboxId: mailbox.id, validity, internalDate: message.internalDate, bodyStructure: message.bodyStructure});
               if (await db.prepare('SELECT 1 FROM emails WHERE message_id=?').get(letter.message_id)) continue;
-              if (own.has(lower(letter.from_address))) letter.direction = 'outgoing';
               const found = await findDeal(db, letter, {own, known});
+              letter.direction = await letterDirection(db, letter, found?.deal_id, own);
               added += await storeLetter(db, letter, {mailboxId: mailbox.id, dealId: found?.deal_id, linkedBy: found?.linked_by});
             }
             folder.last = Math.max(folder.last, ...chunk);
@@ -311,7 +345,7 @@ export async function sendReply(db, box, {original, user, text, to, cc, all = fa
   const references = [...new Set([...letter.references, letter.message_id])].slice(-50);
   const messageId = `<${randomUUID()}@${mailbox.email.split('@')[1]}>`;
   const subject = reSubject(letter.subject || '');
-  const transport = mailHooks.smtpTransport(await smtpOptions(mailbox, box.open(mailbox.secret)));
+  const transport = await mailHooks.smtpTransport(await smtpOptions(mailbox, box.open(mailbox.secret)));
   try {
     await transport.sendMail({from: {name: mailbox.name || '', address: mailbox.email}, to: toList, cc: ccList.length ? ccList : undefined, subject, text: body, messageId, inReplyTo: letter.message_id, references: references.join(' ')});
   } catch (error) {
@@ -346,10 +380,10 @@ function mailboxView(row, box) {
 }
 
 async function checkConnection(mailbox, secret) {
-  const client = mailHooks.imapClient(await imapOptions(mailbox, secret));
+  const client = await mailHooks.imapClient(await imapOptions(mailbox, secret));
   try { await client.connect(); } catch (error) { throw new MailError(400, `IMAP ${mailbox.imap_host}: ${error?.responseText || error?.message || error}`); }
   finally { await client.logout().catch(() => client.close?.()); }
-  const transport = mailHooks.smtpTransport(await smtpOptions(mailbox, secret));
+  const transport = await mailHooks.smtpTransport(await smtpOptions(mailbox, secret));
   try { await transport.verify(); } catch (error) { throw new MailError(400, `SMTP ${mailbox.smtp_host}: ${error?.response || error?.message || error}`); }
   finally { transport.close?.(); }
 }
@@ -430,11 +464,11 @@ export function registerMail(app, db, {auth, admin, audit, requirePermission, se
     res.json((await db.prepare(`${emailSelect} WHERE e.deal_id IS NULL ORDER BY e.sent_at DESC,e.id DESC LIMIT ?`).all(limit)).map(row => emailView(row, {preview: true})));
   }));
   app.post('/api/mail/emails/:id/link', auth, admin, route(async (req, res) => {
-    const email = await db.prepare('SELECT id,deal_id,subject FROM emails WHERE id=?').get(Number(req.params.id) || 0);
+    const email = await db.prepare('SELECT id,deal_id,subject,from_address FROM emails WHERE id=?').get(Number(req.params.id) || 0);
     if (!email) throw new MailError(404, 'Письмо не найдено');
     const dealId = req.body?.deal_id === null ? null : Number(req.body?.deal_id);
     if (dealId !== null && !(await db.prepare('SELECT 1 FROM deals WHERE id=? AND deleted_at IS NULL').get(dealId))) bad('Сделка не найдена');
-    await db.prepare('UPDATE emails SET deal_id=?,linked_by=? WHERE id=?').run(dealId, dealId ? 'manual' : '', email.id);
+    await db.prepare('UPDATE emails SET deal_id=?,linked_by=?,direction=? WHERE id=?').run(dealId, dealId ? 'manual' : '', await letterDirection(db, email, dealId, await connectedAddresses(db)), email.id);
     await audit(req, 'email.linked', {target: `email:${email.id}`, details: dealId ? `К сделке ${dealId}` : 'Отвязано от сделки'});
     res.json({ok: true});
   }));

@@ -191,8 +191,8 @@ GET /api/v1/emails                  # all stored letters; filters: deal_id, mail
 ```
 
 `message_id=<id>` returns the letter with that Message-ID and the letters whose In-Reply-To is that ID. Each item:
-- identity and links: `id`, `mailbox_id`, `mailbox` (address of the mailbox), `deal_id` (`null` when not linked), `linked_by` (`thread`, `address`, `reply` for replies sent from the card, `manual`);
-- `direction`: `outgoing` when sent from a connected mailbox address;
+- identity and links: `id`, `mailbox_id`, `mailbox` (address of the mailbox), `deal_id` (`null` when not linked), `linked_by` (`thread`, `address`, `subject`, `reply` for replies sent from the card, `manual`);
+- `direction`: in a deal, `incoming` when From is the client (the e-mail of the deal's contact or company, or the same domain unless it is a free mail service) and `outgoing` otherwise (connected mailboxes, outreach mailboxes, managers); without a deal, `outgoing` only from a connected mailbox;
 - headers: `message_id`, `in_reply_to`, `references` (array);
 - people: `from` `{address, name}`, `reply_to`, `to` and `cc` (arrays of `{address, name}`);
 - content: `subject`, `text` (plain text, HTML converted), `attachments` (`[{filename, content_type, size}]`, names only, files are not stored);

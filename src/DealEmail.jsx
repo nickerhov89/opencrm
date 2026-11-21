@@ -40,7 +40,7 @@ export default function DealEmail({item,onLoadEmail,onReplyEmail,canReply}){
   return <div className={'timeline-item deal-email '+(incoming?'incoming':'outgoing')}>
     <span className="timeline-icon"><Icon size={16}/></span>
     <div className="deal-email-body">
-      <small>{dt(item.sent_at)}{item.mailbox?` · ${item.mailbox}`:''}{item.author?` · ${item.author}`:''}{item.linked_by==='thread'?' · по ветке':''}</small>
+      <small>{dt(item.sent_at)}{item.mailbox?` · ${item.mailbox}`:''}{item.author?` · ${item.author}`:''}{item.linked_by==='thread'?' · по ветке':item.linked_by==='subject'?' · по теме':''}</small>
       <strong>{incoming?'Входящее письмо':'Исходящее письмо'}{item.subject?` · ${item.subject}`:''}</strong>
       <div className="deal-email-people"><span>От: {person(item.from)}</span><span>Кому: {item.to.map(person).join(', ')||'—'}</span>{item.cc.length>0&&<span>Копия: {item.cc.map(person).join(', ')}</span>}</div>
       <p className={long&&!expanded?'collapsed':''}>{text||'(без текста)'}</p>
