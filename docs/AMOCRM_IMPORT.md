@@ -30,7 +30,7 @@ Run the commands in the app container (`docker compose -p opencrm exec opencrm .
 
    The load goes into a CRM without deals, contacts, companies, tasks, notes or custom fields. `--replace` first removes those (and pipelines with amoCRM IDs), for example to load a fresh export again; users, API keys, webhooks and settings stay. Attachments block `--replace`. The empty seed pipeline «Воронка — новые лиды» is removed unless `--keep-default-pipeline` is given.
 
-4. Give people passwords: `node scripts/admin.mjs reset-password <email>` or **Настройки → Пользователи**. Loaded users cannot sign in until then; users inactive in amoCRM are disabled. An amoCRM user whose e-mail already has an OpenCRM account is linked to that account instead of getting a new one (the report lists them).
+4. Give people passwords: `node scripts/admin.mjs reset-password <email>` or **Настройки → Пользователи**. Loaded users cannot sign in until then; users inactive in amoCRM are disabled. An OpenCRM account with the e-mail of an amoCRM user (for example the administrator who set up the CRM) keeps its password and sessions but takes the amoCRM user ID, together with everything that refers to it, so integrations that match employees by amoCRM ID keep working; the report lists these as `rekeyed_users`.
 
 5. Delete the export folder: it holds customers' personal data.
 
