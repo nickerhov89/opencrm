@@ -147,7 +147,13 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
 
     const report = await loadDump(db, fixture(), {log: quiet});
     assert.deepEqual(report.counts, {users: 2, pipelines: 2, stages: 9, custom_fields: 8, companies: 1, contacts: 2, deals: 3, deal_contacts: 3, custom_field_values: 9, tasks: 3, notes: 2, entity_notes: 2, deal_stage_changes: 6});
-    assert.deepEqual(report.merged_users, [{amo_id: 9003, email: 'admin@example.test', id: admin.id}]);
+    assert.deepEqual(report.rekeyed_users, [{email: 'admin@example.test', from: admin.id, to: 9003}]);
+    assert.deepEqual(report.merged_users, []);
+    assert.equal(Number((await one('SELECT COUNT(*) n FROM users WHERE email=$1', 'admin@example.test')).n), 1);
+    assert.equal(Number((await one('SELECT id FROM users WHERE email=$1', 'admin@example.test')).id), 9003);
+    assert.equal(Number((await one('SELECT COUNT(*) n FROM sessions WHERE user_id=9003')).n), 1, 'the signed-in session follows the new ID');
+    assert.ok(Number((await one('SELECT COUNT(*) n FROM audit_log WHERE user_id=9003')).n) > 0);
+    await call('/me');
     assert.equal(report.dropped_pipelines.length, 1, 'the empty seed pipeline is removed');
     assert.equal(Number((await one("SELECT COUNT(*) n FROM pipelines WHERE name='Воронка — новые лиды'")).n), 0);
     assert.ok(report.warnings['Значения удалённых полей пропущены']);
@@ -158,7 +164,6 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
     const anna = await one('SELECT id,email,role,password_hash,disabled_at FROM users WHERE id=9001');
     assert.deepEqual({...anna, id: Number(anna.id)}, {id: 9001, email: 'anna@agency.test', role: 'admin', password_hash: 'x:y', disabled_at: null});
     assert.ok((await one('SELECT disabled_at FROM users WHERE id=9002')).disabled_at);
-    assert.equal(Number((await one('SELECT COUNT(*) n FROM users WHERE id=9003')).n), 0);
 
     // Pipelines and stages keep their IDs; 142/143 become per-pipeline won/lost stages.
     const {won: won1, lost: lost1} = report.closing_stages[7001], {won: won2, lost: lost2} = report.closing_stages[7002];
@@ -186,7 +191,7 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
     assert.equal(lost.stage_id, lost2);
     assert.equal(lost.loss_reason, 'Дорого');
     assert.equal(lost.amount, 50001);
-    assert.equal(lost.owner_id, admin.id, 'merged amo user points at the existing account');
+    assert.equal(lost.owner_id, 9003, 'the existing account now has the amoCRM ID');
     assert.equal(lost.closed_at, '2025-05-20 09:00:00');
     const unnamed = await call('/v1/deals/21000003', {key});
     assert.equal(unnamed.name, 'Сделка #21000003');
@@ -237,7 +242,7 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
       [21000001, 5001, 5002, 7001, 9001, '2025-03-11 09:00:00'],
       [21000001, 5002, won1, 7001, 9001, '2025-04-01 08:00:00'],
       [21000002, null, 5101, 7002, null, '2025-05-01 09:00:00'],
-      [21000002, 5101, lost2, 7002, admin.id, '2025-05-20 09:00:00'],
+      [21000002, 5101, lost2, 7002, 9003, '2025-05-20 09:00:00'],
       [21000003, null, 5001, 7001, 9002, '2025-06-01 09:00:00']
     ]);
     const changes = await call('/v1/stage-changes?deal_id=21000001', {key});

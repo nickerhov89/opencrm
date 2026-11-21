@@ -397,6 +397,28 @@ async function dropPipelines(db, ids) {
   await db.query('DELETE FROM pipelines WHERE id = ANY($1)', [ids]);
 }
 
+// An OpenCRM user with the e-mail of an amoCRM user takes the amoCRM ID, so integrations that match
+// employees by amoCRM ID keep working. Every reference follows (foreign keys are off in replica mode).
+async function rekeyUsers(db, dump) {
+  const users = (await db.query('SELECT id,email FROM users')).rows.map(u => ({id: Number(u.id), email: u.email.toLowerCase()}));
+  const byEmail = new Map(users.map(u => [u.email, u.id])), ids = new Set(users.map(u => u.id));
+  const moves = [];
+  for (const amo of dump.users) {
+    const email = String(amo.email || '').trim().toLowerCase(), current = byEmail.get(email);
+    if (!email || current === undefined || current === amo.id) continue;
+    if (ids.has(amo.id)) throw new Error(`ID сотрудника amoCRM ${amo.id} (${email}) уже занят другим пользователем OpenCRM`);
+    moves.push({email, from: current, to: amo.id}); ids.delete(current); ids.add(amo.id);
+  }
+  if (!moves.length) return moves;
+  const columns = (await db.query("SELECT c.conrelid::regclass::text tbl, a.attname col FROM pg_constraint c JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum = ANY(c.conkey) WHERE c.contype='f' AND c.confrelid='users'::regclass")).rows.map(r => [r.tbl, r.col]);
+  columns.push(['deal_stage_changes', 'user_id']);
+  for (const {from, to} of moves) {
+    await db.query('UPDATE users SET id=$1 WHERE id=$2', [to, from]);
+    for (const [table, column] of columns) await db.query(`UPDATE ${table} SET ${column}=$1 WHERE ${column}=$2`, [to, from]);
+  }
+  return moves;
+}
+
 class DryRun extends Error {}
 
 // Loads an export in one transaction. dryRun: everything is written, checked and rolled back.
@@ -412,6 +434,7 @@ export async function loadDump(db, dump, {dryRun = false, replace = false, keepD
       if (busy.length && !replace) throw new Error(`В CRM уже есть данные (${busy.map(([t, n]) => `${t}: ${n}`).join(', ')}). Загрузка идёт в пустую CRM; чтобы заменить данные, запустите с --replace`);
       if (replace) await wipe(db, (await db.query('SELECT id FROM pipelines WHERE id = ANY($1)', [amoPipelines])).rows.map(r => Number(r.id)));
       else if ((await db.query('SELECT id FROM pipelines WHERE id = ANY($1)', [amoPipelines])).rows.length) throw new Error('Воронки с ID из amoCRM уже есть в CRM; для повторной загрузки используйте --replace');
+      const rekeyed = await rekeyUsers(db, dump);
       const users = (await db.query('SELECT id,email FROM users')).rows.map(u => ({id: Number(u.id), email: u.email}));
       const maxStageId = await count(db, 'SELECT COALESCE(MAX(id),0) n FROM stages');
       const result = transform(dump, {users, maxStageId});
@@ -434,7 +457,7 @@ export async function loadDump(db, dump, {dryRun = false, replace = false, keepD
       })) { const n = await count(db, sql); if (n) broken[name] = n; }
       if (Object.keys(broken).length) throw new Error(`Проверка целостности не прошла: ${JSON.stringify(broken)}`);
       const byStage = (await db.query('SELECT p.id pipeline_id, p.name pipeline, s.id stage_id, s.name stage, s.kind, COUNT(d.id) deals FROM pipelines p JOIN stages s ON s.pipeline_id=p.id LEFT JOIN deals d ON d.stage_id=s.id GROUP BY p.id,p.name,s.id,s.name,s.kind,s.sort_order,p.sort_order ORDER BY p.sort_order,p.id,s.sort_order')).rows.map(r => ({...r, pipeline_id: Number(r.pipeline_id), stage_id: Number(r.stage_id), deals: Number(r.deals)}));
-      report = {dry_run: dryRun, counts: Object.fromEntries(loadOrder.map(table => [table, result.rows[table].length])), closing_stages: result.closing, merged_users: result.mergedUsers, dropped_pipelines: droppedPipelines, warnings: result.warnings, deals_by_stage: byStage};
+      report = {dry_run: dryRun, counts: Object.fromEntries(loadOrder.map(table => [table, result.rows[table].length])), closing_stages: result.closing, rekeyed_users: rekeyed, merged_users: result.mergedUsers, dropped_pipelines: droppedPipelines, warnings: result.warnings, deals_by_stage: byStage};
       if (dryRun) throw new DryRun();
     })();
   } catch (error) { if (!(error instanceof DryRun)) throw error; }

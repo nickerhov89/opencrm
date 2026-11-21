@@ -40,6 +40,7 @@ try {
       await writeFile(join(dir, 'load-report.json'), JSON.stringify(report, null, 2));
       console.log(`\nЗагружено${report.dry_run ? ' (откачено, это пробный прогон)' : ''}:`);
       for (const [table, n] of Object.entries(report.counts)) console.log(`  ${table}: ${n}`);
+      if (report.rekeyed_users.length) console.log(`Пользователи OpenCRM с почтой сотрудника amoCRM получили его ID: ${report.rekeyed_users.map(u => `${u.email} (${u.from} → ${u.to})`).join(', ')}`);
       if (report.merged_users.length) console.log(`Пользователи amoCRM с уже существующей почтой привязаны к имеющимся учётным записям: ${report.merged_users.map(u => `${u.email} (amo ${u.amo_id} → ${u.id})`).join(', ')}`);
       if (report.dropped_pipelines.length) console.log(`Удалена пустая стартовая воронка: ${report.dropped_pipelines.join(', ')}`);
       for (const [text, {count, examples}] of Object.entries(report.warnings)) console.log(`Внимание: ${text}: ${count}${examples.length ? ` (например ${examples.join('; ')})` : ''}`);
