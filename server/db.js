@@ -417,6 +417,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at,id);
 -- its pipeline along a listed pair; lock_deals=1 keeps deals from being moved to another pipeline.
 ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS transition_mode TEXT NOT NULL DEFAULT 'any' CHECK(transition_mode IN ('any','restricted'));
 ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS lock_deals INTEGER NOT NULL DEFAULT 0 CHECK(lock_deals IN (0,1));
+ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS rules_for_admins INTEGER NOT NULL DEFAULT 0 CHECK(rules_for_admins IN (0,1));
 CREATE TABLE IF NOT EXISTS stage_transitions (from_stage_id BIGINT NOT NULL REFERENCES stages(id) ON DELETE CASCADE, to_stage_id BIGINT NOT NULL REFERENCES stages(id) ON DELETE CASCADE, PRIMARY KEY(from_stage_id,to_stage_id), CHECK(from_stage_id<>to_stage_id));
 CREATE INDEX IF NOT EXISTS idx_stage_transitions_to ON stage_transitions(to_stage_id);
 

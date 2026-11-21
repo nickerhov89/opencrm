@@ -181,6 +181,15 @@ test('API v1: deals, contacts, companies, tasks, notes, fields, pipelines and st
     assert.deepEqual((await call(`/deals/${deal.id}/allowed-stages`)).stage_ids.sort(), [won.id, lost.id].sort());
     await call(`/pipelines/${pipeline.id}/transitions`, {method: 'PUT', body: {mode: 'any'}, status: 403});
     await call('/login', {method: 'POST', body: {email: 'admin@example.test', password: 'test-password-123'}});
+    // With rules_for_admins the administrator is bound too; the error lists where the deal may go.
+    assert.equal((await call(`/pipelines/${pipeline.id}/transitions`, {method: 'PUT', body: {rules_for_admins: true}})).rules_for_admins, true);
+    const adminBlocked = await call(`/deals/${deal.id}`, {method: 'PATCH', body: {stage_id: newStage.id}, status: 403});
+    assert.match(adminBlocked.error, new RegExp(`можно перейти в: «${won.name}», «${lost.name}»`));
+    await call('/deals/bulk', {method: 'POST', body: {ids: [deal.id], action: 'stage', stage_id: newStage.id}, status: 403});
+    assert.deepEqual((await call(`/deals/${deal.id}/allowed-stages`)).stage_ids.sort(), [won.id, lost.id].sort());
+    await call(`/pipelines/${pipeline.id}/transitions`, {method: 'PUT', body: {rules_for_admins: false}});
+    await call(`/deals/${deal.id}`, {method: 'PATCH', body: {stage_id: qualified.id}});
+    await call(`/deals/${deal.id}`, {method: 'PATCH', body: {stage_id: proposal.id}});
     await call(`/pipelines/${pipeline.id}/transitions`, {method: 'PUT', body: {mode: 'any', lock_deals: false}});
     await call(`/v1/deals/${deal.id}`, {key, method: 'PATCH', body: {pipeline_id: defaultPipeline.id}});
 

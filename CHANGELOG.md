@@ -2,6 +2,7 @@
 
 ## Unreleased — closer to amoCRM
 
+- Stage transition rules can bind administrators too (**Правила действуют и на администраторов**), like the amoCRM funnel guard; a refused move names the stages the deal may go to.
 - Distribution rules can also check other deal custom fields (for example «Подысточник» = «Автоаутрич EN»); every condition must hold, case is ignored.
 - The desktop opens on «Сегодня»; board cards show how many days the earliest open task is overdue («3 дн.»).
 - Distribution of new deals (Settings → Распределение, like the amoCRM widget): rules by pipeline, source and origin (API, accepted requests, created by hand) give new deals to managers in turn a few seconds after creation; the manager becomes the owner of the deal, its main contact, its company and its open tasks, then the rule's task («Связаться: Взять в работу», due at the end of the day) is created for them. Deals loaded with an old date are never redistributed. API: `/api/distribution/rules`.
