@@ -22,3 +22,11 @@
 .deal-compose-mail select,.deal-compose-mail input{height:30px;border:1px solid #d5dadd;border-radius:2px;background:#fff;color:#35424e;padding:4px 7px;font-size:11px;min-width:0}
 .deal-compose-record{display:flex;align-items:center;gap:6px;font-size:10px;color:#8a96a0}
 @media(max-width:650px){.deal-compose-mail{grid-template-columns:1fr}}
+.deal-compose-chat{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:12px;color:#6b7781}
+.deal-compose-chat button{border:1px solid #cfd8de;background:#fff;color:#43515c;border-radius:12px;padding:3px 10px;font-size:12px;cursor:pointer}
+.deal-compose-chat button.active{border-color:#427db9;background:#e8f1fb;color:#2f6db0}
+.deal-compose-chat em{font-style:normal}
+.timeline-item.deal-chat{border-left:3px solid #8fb8de!important;background:#f7fafd}
+.deal-chat small{display:block;color:#7f8b94;font-size:11px}
+.deal-chat .chat-read{color:#4f9ad8;margin-left:6px}
+.deal-chat .chat-unread{color:#a8b3bb;margin-left:6px}

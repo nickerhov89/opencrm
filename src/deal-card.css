@@ -16,3 +16,7 @@
 .board-close-zone.lost{background:#d06a6f}
 .board-close-zone.is-drop-target{filter:brightness(1.12);box-shadow:inset 0 0 0 3px #fff8}
 @media (max-width:760px){.board-close-zones{left:0}}
+
+/* Dragging the board sideways by an empty spot (drag-scroll.js). */
+.board.drag-scrolling{cursor:grabbing;user-select:none}
+.board.drag-scrolling *{cursor:grabbing}
