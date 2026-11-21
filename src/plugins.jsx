@@ -48,6 +48,7 @@ export function loadPlugins(options) {
         id: plugin.id, name: plugin.name, version: plugin.version, settings: plugin.settings || {}, user,
         React, h: React.createElement, useState, useEffect, useMemo, useRef,
         fetch: (path, options) => request(`/api/plugins/${plugin.id}${path.startsWith('/') ? path : `/${path}`}`, options),
+        url: (path = '') => appPath(`/api/plugins/${plugin.id}${path && !path.startsWith('/') ? `/${path}` : path}`),
         api: (path, options) => request(`/api${path.startsWith('/') ? path : `/${path}`}`, options),
         notify: message => notify?.(String(message)),
         openDeal: id => openDeal?.(Number(id)),

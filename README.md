@@ -21,7 +21,7 @@ OpenCRM is an independent project. It is not affiliated with amoCRM and does not
 - Connect external systems with scoped API keys: a full API v1 for deals, contacts, companies, tasks, notes, employees, custom fields and pipelines, and signed, retried webhooks for their changes.
 - Limit how deals move: per-pipeline stage transition rules and a lock that keeps deals in their pipeline.
 
-The application is designed for a team running its own instance. The [generic API and webhooks](docs/INTEGRATIONS.md) can connect it to other services. Connected mailboxes (IMAP/SMTP or Google Workspace) bring letters into the deal feed and let managers reply from the deal ([MAIL.md](docs/MAIL.md)). Built-in messaging, telephony, and amoCRM synchronization are **not** included; call and message records are entered manually. [Plugins](docs/PLUGINS.md) add pages, deal-card panels and incoming webhooks; a Tilda forms plugin is included as an example.
+The application is designed for a team running its own instance. The [generic API and webhooks](docs/INTEGRATIONS.md) can connect it to other services. Connected mailboxes (IMAP/SMTP or Google Workspace) bring letters into the deal feed and let managers reply from the deal ([MAIL.md](docs/MAIL.md)). Built-in messaging, telephony, and amoCRM synchronization are **not** included; call and message records are entered manually. [Plugins](docs/PLUGINS.md) add pages, deal-card panels and incoming webhooks; Tilda forms and Mango Office telephony plugins are included.
 
 ## Try it locally
 

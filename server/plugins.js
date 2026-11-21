@@ -275,6 +275,17 @@ export function registerPlugins(app, db, {auth, admin, audit = async () => {}, u
           if (!body) bad('Пустое событие');
           return (await db.prepare('INSERT INTO entity_activity (entity_type,entity_id,user_id,event) VALUES (?,?,NULL,?)').run(type, Number(entityId), `${manifest.name}: ${body}`)).lastInsertRowid;
         },
+        // A call, letter or message in the deal feed, as if an employee had recorded it by hand.
+        async addCommunication(dealId, {kind = 'call', direction = 'incoming', subject = '', body = '', user_id = null, created_at} = {}) {
+          guard();
+          if (!await db.prepare('SELECT id FROM deals WHERE id=?').get(Number(dealId) || 0)) bad('Сделка не найдена');
+          if (!['call', 'email', 'message'].includes(kind) || !['incoming', 'outgoing'].includes(direction)) bad('kind: call, email или message; direction: incoming или outgoing');
+          const user = Number(user_id) && await db.prepare('SELECT id FROM users WHERE id=?').get(Number(user_id)) ? Number(user_id) : null;
+          const at = created_at ? new Date(created_at) : new Date();
+          if (Number.isNaN(at.getTime())) bad('created_at — дата');
+          const text = body === undefined || body === null ? '' : String(body).slice(0, 20000);
+          return (await db.prepare('INSERT INTO deal_communications (deal_id,user_id,kind,direction,subject,body,created_at) VALUES (?,?,?,?,?,?,?)').run(Number(dealId), user, kind, direction, String(subject).slice(0, 255), text || String(subject).slice(0, 255) || '—', at.toISOString().slice(0, 19).replace('T', ' '))).lastInsertRowid;
+        },
         async addNote(dealId, message) {
           guard();
           if (!await db.prepare('SELECT id FROM deals WHERE id=?').get(Number(dealId) || 0)) bad('Сделка не найдена');
