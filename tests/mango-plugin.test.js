@@ -129,6 +129,10 @@ test('Mango Office: звонки в ленту сделки, «Неразобр�
     assert.equal(Number((await db.prepare("SELECT contact_id FROM plugin_mango_calls WHERE entry_id='e10'").get()).contact_id), words.id);
     await send('events/summary', summary('e11', 2, '72233891544', 101, {answered: false}));
     assert.equal((await db.prepare("SELECT contact_id FROM plugin_mango_calls WHERE entry_id='e11'").get()).contact_id, null, 'цифры на стыке слова не склеиваются');
+    // Non-breaking spaces, non-breaking hyphens, dashes and invisible marks inside a number do not split it.
+    const odd = await request('/contacts', 'POST', {name: 'Вера', phone: '$ 79 061‑110–727‎'}, 201);
+    await send('events/summary', summary('e12', 1, '79061110727', 101, {talk: 5}));
+    assert.equal(Number((await db.prepare("SELECT contact_id FROM plugin_mango_calls WHERE entry_id='e12'").get()).contact_id), odd.id);
     // Digits across the comma do not glue into a third number.
     await send('events/summary', summary('e9', 2, '73344891355', 101, {answered: false}));
     assert.equal((await db.prepare("SELECT contact_id FROM plugin_mango_calls WHERE entry_id='e9'").get()).contact_id, null);
@@ -145,7 +149,7 @@ test('Mango Office: звонки в ленту сделки, «Неразобр�
     assert.equal(calls[0].number, '+7 900 111-22-33');
     assert.equal(calls[0].duration, '2:15');
     const journal = await request('/plugins/mango-office/calls');
-    assert.equal(journal.length, 10);
+    assert.equal(journal.length, 11);
     assert.deepEqual((await request('/plugins/mango-office/calls?filter=missed')).map(call => call.entry_id).sort(), ['e2', 'e3']);
     assert.ok((await request('/plugins/mango-office/calls?filter=missed')).every(call => call.lead_id === leads[0].id));
 
