@@ -250,9 +250,9 @@ export function registerApiV1(app, db, helpers) {
 
   // ---------- notes of all records of one type ----------
   const noteSources = {
-    deal: {scope: 'deals:read', sql: "SELECT n.id,'deal' entity_type,n.deal_id entity_id,n.body,n.pinned,n.user_id,n.created_at,n.updated_at FROM notes n JOIN deals e ON e.id=n.deal_id WHERE TRUE", entity: 'n.deal_id'},
-    contact: {scope: 'contacts:read', sql: "SELECT n.id,n.entity_type,n.entity_id,n.body,n.user_id,n.created_at,n.updated_at FROM entity_notes n WHERE n.entity_type='contact'", entity: 'n.entity_id'},
-    company: {scope: 'companies:read', sql: "SELECT n.id,n.entity_type,n.entity_id,n.body,n.user_id,n.created_at,n.updated_at FROM entity_notes n WHERE n.entity_type='company'", entity: 'n.entity_id'}
+    deal: {scope: 'deals:read', sql: "SELECT n.id,'deal' entity_type,n.deal_id entity_id,n.body,n.pinned,n.note_type,n.user_id,n.created_at,n.updated_at FROM notes n JOIN deals e ON e.id=n.deal_id WHERE TRUE", entity: 'n.deal_id'},
+    contact: {scope: 'contacts:read', sql: "SELECT n.id,n.entity_type,n.entity_id,n.body,n.note_type,n.user_id,n.created_at,n.updated_at FROM entity_notes n WHERE n.entity_type='contact'", entity: 'n.entity_id'},
+    company: {scope: 'companies:read', sql: "SELECT n.id,n.entity_type,n.entity_id,n.body,n.note_type,n.user_id,n.created_at,n.updated_at FROM entity_notes n WHERE n.entity_type='company'", entity: 'n.entity_id'}
   };
   app.get('/api/v1/notes', apiKey('deals:read', 'contacts:read', 'companies:read'), route(async (req, res) => {
     const type = queryText(req, 'entity_type', 20), source = noteSources[type];
@@ -261,6 +261,8 @@ export function registerApiV1(app, db, helpers) {
     const where = [], params = [];
     const entity = queryId(req, 'entity_id');
     if (entity) { where.push(`${source.entity}=?`); params.push(entity); }
+    const noteType = queryText(req, 'note_type', 40);
+    if (noteType) { where.push('n.note_type=?'); params.push(noteType); }
     syncFilters(req, 'n', where, params);
     await listPage(req, res, {sql: `${source.sql}${where.map(item => ` AND ${item}`).join('')}`, params, alias: 'n'}, async rows => rows.map(noteView));
   }));
@@ -609,7 +611,8 @@ export function registerApiV1(app, db, helpers) {
   app.get('/api/v1/deals/:id/notes', apiKey('deals:read'), route(async (req, res) => {
     const id = positiveId(req.params.id);
     await liveRow('deals', id);
-    res.json({items: (await db.prepare('SELECT id,deal_id,body,pinned,user_id,created_at,updated_at FROM notes WHERE deal_id=? ORDER BY id DESC LIMIT 500').all(id)).map(noteView)});
+    const noteType = queryText(req, 'note_type', 40);
+    res.json({items: (await db.prepare(`SELECT id,deal_id,body,pinned,note_type,user_id,created_at,updated_at FROM notes WHERE deal_id=?${noteType ? ' AND note_type=?' : ''} ORDER BY id DESC LIMIT 500`).all(id, ...(noteType ? [noteType] : []))).map(noteView)});
   }));
   app.post('/api/v1/deals/:id/notes', apiKey('deals:write'), route(async (req, res) => {
     const id = positiveId(req.params.id), body = objectBody(req);
@@ -621,14 +624,14 @@ export function registerApiV1(app, db, helpers) {
       await event(id, userId, `Добавлена заметка ${via(req)}`);
       return created.lastInsertRowid;
     })();
-    res.status(201).json(noteView(await db.prepare('SELECT id,deal_id,body,pinned,user_id,created_at,updated_at FROM notes WHERE id=?').get(noteId)));
+    res.status(201).json(noteView(await db.prepare('SELECT id,deal_id,body,pinned,note_type,user_id,created_at,updated_at FROM notes WHERE id=?').get(noteId)));
   }));
   app.patch('/api/v1/deals/:id/notes/:noteId', apiKey('deals:write'), route(async (req, res) => {
     const id = positiveId(req.params.id), noteId = positiveId(req.params.noteId), body = objectBody(req), pinned = flag(body, 'pinned');
     if (pinned === undefined) bad('Передайте pinned: true или false');
     const result = await db.prepare('UPDATE notes SET pinned=? WHERE id=? AND deal_id=?').run(pinned ? 1 : 0, noteId, id);
     if (!result.changes) throw new ApiError(404, 'Примечание не найдено');
-    res.json(noteView(await db.prepare('SELECT id,deal_id,body,pinned,user_id,created_at,updated_at FROM notes WHERE id=?').get(noteId)));
+    res.json(noteView(await db.prepare('SELECT id,deal_id,body,pinned,note_type,user_id,created_at,updated_at FROM notes WHERE id=?').get(noteId)));
   }));
 
   // ---------- contacts and companies ----------
@@ -724,7 +727,8 @@ export function registerApiV1(app, db, helpers) {
     app.get(`/api/v1/${spec.path}/:id/notes`, read, route(async (req, res) => {
       const id = positiveId(req.params.id);
       await liveRow(spec.table, id);
-      res.json({items: await db.prepare('SELECT id,entity_type,entity_id,body,user_id,created_at,updated_at FROM entity_notes WHERE entity_type=? AND entity_id=? ORDER BY id DESC LIMIT 500').all(type, id)});
+      const noteType = queryText(req, 'note_type', 40);
+      res.json({items: await db.prepare(`SELECT id,entity_type,entity_id,body,note_type,user_id,created_at,updated_at FROM entity_notes WHERE entity_type=? AND entity_id=?${noteType ? ' AND note_type=?' : ''} ORDER BY id DESC LIMIT 500`).all(type, id, ...(noteType ? [noteType] : []))});
     }));
     app.post(`/api/v1/${spec.path}/:id/notes`, write, route(async (req, res) => {
       const id = positiveId(req.params.id), body = objectBody(req);
@@ -732,7 +736,7 @@ export function registerApiV1(app, db, helpers) {
       const content = text(body, 'body', 10000, {required: true}), userId = idField(body, 'user_id') ?? null;
       await ensureRef('users', userId, 'Пользователь');
       const created = await db.prepare('INSERT INTO entity_notes (entity_type,entity_id,user_id,body) VALUES (?,?,?,?)').run(type, id, userId, content);
-      res.status(201).json(await db.prepare('SELECT id,entity_type,entity_id,body,user_id,created_at,updated_at FROM entity_notes WHERE id=?').get(created.lastInsertRowid));
+      res.status(201).json(await db.prepare('SELECT id,entity_type,entity_id,body,note_type,user_id,created_at,updated_at FROM entity_notes WHERE id=?').get(created.lastInsertRowid));
     }));
   }
 

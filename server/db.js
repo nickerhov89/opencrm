@@ -348,6 +348,9 @@ END $$;
 -- Contacts: Telegram username, matched without @, t.me/ and letter case.
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS telegram TEXT NOT NULL DEFAULT '';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+-- Where a note came from: 'common' is written by a person; loads from amoCRM keep its note types (call_in, amomail_message, ...).
+ALTER TABLE notes ADD COLUMN IF NOT EXISTS note_type TEXT NOT NULL DEFAULT 'common';
+ALTER TABLE entity_notes ADD COLUMN IF NOT EXISTS note_type TEXT NOT NULL DEFAULT 'common';
 CREATE OR REPLACE FUNCTION normalize_telegram(value text) RETURNS text LANGUAGE sql IMMUTABLE AS $$
   SELECT lower(regexp_replace(btrim(COALESCE(value, '')), '^(https?://)?(www[.])?((t|telegram)[.]me/)?@?', ''))
 $$;
@@ -441,12 +444,12 @@ BEGIN
 END $$;
 CREATE OR REPLACE FUNCTION trg_webhook_deal_note() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  PERFORM webhook_emit('note.created', json_build_object('id',NEW.id,'entity_type','deal','entity_id',NEW.deal_id,'user_id',NEW.user_id,'body',NEW.body,'created_at',NEW.created_at));
+  PERFORM webhook_emit('note.created', json_build_object('id',NEW.id,'entity_type','deal','entity_id',NEW.deal_id,'user_id',NEW.user_id,'body',NEW.body,'note_type',NEW.note_type,'created_at',NEW.created_at));
   RETURN NULL;
 END $$;
 CREATE OR REPLACE FUNCTION trg_webhook_entity_note() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  PERFORM webhook_emit('note.created', json_build_object('id',NEW.id,'entity_type',NEW.entity_type,'entity_id',NEW.entity_id,'user_id',NEW.user_id,'body',NEW.body,'created_at',NEW.created_at));
+  PERFORM webhook_emit('note.created', json_build_object('id',NEW.id,'entity_type',NEW.entity_type,'entity_id',NEW.entity_id,'user_id',NEW.user_id,'body',NEW.body,'note_type',NEW.note_type,'created_at',NEW.created_at));
   RETURN NULL;
 END $$;
 DROP TRIGGER IF EXISTS trg_webhook_delivery_enqueue ON webhook_events;

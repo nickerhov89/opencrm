@@ -2,6 +2,7 @@
 
 ## Unreleased — data for reports and the amoCRM move
 
+- Notes have `note_type` (`common` for notes written here, the amoCRM type for loaded ones) in the API, the `note_type` filter and the `note.created` webhook. The amoCRM import downloads files directly when the proxy refuses a host.
 - `scripts/amocrm-import.mjs`: one-time move from amoCRM. `export` downloads the account through the amoCRM API v4 (proxy, rate limit, retries, resumable), `load` writes it in one transaction keeping amoCRM IDs, with per-pipeline won/lost stages, stage history, tasks, notes, files and custom fields; an existing account with an amoCRM e-mail takes the amoCRM user ID; `--dry-run` rolls back after the checks, `--replace` loads again. See docs/AMOCRM_IMPORT.md.
 - Tasks have a `description` (up to 5000 characters) next to the 500-character title, in the task window, the deal timeline, the task board and the API.
 - Custom field values may be up to 5000 characters (was 1000).

@@ -266,6 +266,11 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
     assert.equal(list.find(n => n.id === 81000005).body, 'Входящее письмо\nОт: Иван <ivan@romashka.test>\nКому: Анна <anna@agency.test>\nТема: Смета\nВложений: 1\n\nПосмотрите, пожалуйста');
     assert.equal(list.find(n => n.id === 81000006).body, 'Tilda: Заявка с сайта');
     assert.equal(list.find(n => n.id === 81000004).body, 'Файл: Смета.pdf');
+    assert.deepEqual(Object.fromEntries(list.map(n => [n.id, n.note_type])), {81000001: 'common', 81000002: 'call_in', 81000004: 'attachment', 81000005: 'amomail_message', 81000006: 'extended_service_message'});
+    assert.deepEqual((await call('/v1/deals/21000001/notes?note_type=common', {key})).items.map(n => n.id), [81000001]);
+    assert.deepEqual((await call('/v1/notes?entity_type=deal&note_type=call_in', {key})).items.map(n => n.id), [81000002]);
+    assert.deepEqual((await call('/v1/contacts/4001/notes?note_type=common', {key})).items.map(n => [n.id, n.note_type]), [[82000001, 'common']]);
+    assert.equal((await call('/v1/notes?entity_type=company', {key})).items[0].note_type, 'service_message');
     assert.match(list.find(n => n.id === 81000002).body, /Входящий звонок[\s\S]*Длительность: 2:05[\s\S]*https:\/\/records\.test\/1\.mp3/);
     assert.equal((await one('SELECT body FROM entity_notes WHERE id=83000001')).body, 'Робот: Создана из формы');
 
@@ -288,6 +293,7 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
 
     // After the load the CRM works as usual: new IDs above amo ones, triggers back on.
     const created = await call('/v1/deals', {method: 'POST', key, body: {name: 'Новая', stage_id: 5002}, status: 201});
+    assert.equal((await call(`/v1/deals/${created.id}/notes`, {method: 'POST', key, body: {body: 'Руками'}, status: 201})).note_type, 'common', 'notes written here are common');
     assert.ok(created.id > 21000003);
     await call('/v1/deals/21000003/stage', {method: 'PATCH', key, body: {stage_id: 5002}});
     assert.equal(Number((await one('SELECT COUNT(*) n FROM deal_stage_changes WHERE deal_id=21000003')).n), 2);
@@ -309,4 +315,25 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
     server.close();
     await db.close();
   }
+});
+
+test('amoCRM client goes directly to hosts the proxy refuses', async () => {
+  const seen = [];
+  const get = async (url, headers, proxy) => {
+    const host = new URL(url).hostname;
+    seen.push(`${host} ${proxy ? 'proxy' : 'direct'}`);
+    if (proxy && host === 'drive-b.amocrm.ru') throw new Error('proxy CONNECT 403');
+    if (host === 'storage.example.test' && proxy) throw new Error('timeout');
+    if (host === 'drive-b.amocrm.ru' && new URL(url).pathname.startsWith('/download')) return {status: 301, headers: {location: 'https://storage.example.test/f'}, body: ''};
+    if (host === 'storage.example.test') return {status: 200, raw: Buffer.from('data'), headers: {}};
+    return {status: 200, body: '{"ok":true}', headers: {}};
+  };
+  const client = amoClient({baseUrl: 'https://agency.amocrm.ru', token: 't', proxyUrl: 'http://proxy.example.test:3128', minIntervalMs: 0, get});
+  assert.deepEqual(await client.request('https://drive-b.amocrm.ru/v1.0/files/u1'), {ok: true});
+  assert.deepEqual(await client.request('https://drive-b.amocrm.ru/v1.0/files/u2'), {ok: true});
+  assert.deepEqual(seen.splice(0), ['drive-b.amocrm.ru proxy', 'drive-b.amocrm.ru direct', 'drive-b.amocrm.ru direct'], 'a refused host is remembered');
+  assert.equal(String((await client.download('https://drive-b.amocrm.ru/download/u1')).data), 'data');
+  assert.deepEqual(seen, ['drive-b.amocrm.ru direct', 'storage.example.test direct'], 'files go directly first');
+  await client.request('/api/v4/account');
+  assert.equal(seen.at(-1), 'agency.amocrm.ru proxy', 'the API still goes through the proxy');
 });
