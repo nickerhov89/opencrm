@@ -20,7 +20,8 @@ function updatedLabel(value){
 
 function taskStatus(deal){
   if(!deal.open_tasks_count)return null;
-  if(deal.overdue_tasks_count)return {label:'Просрочено',kind:'overdue'};
+  // Overdue: days since the earliest open task was due, as the red «3дн» on amoCRM cards.
+  if(deal.overdue_tasks_count){const due=parseStamp(deal.next_task_at),days=due&&Number.isFinite(due.getTime())?Math.floor((Date.now()-due.getTime())/864e5):0;return {label:days>=1?`${days} дн.`:'Просрочено',kind:'overdue'}}
   const due=parseStamp(deal.next_task_at);if(!due||!Number.isFinite(due.getTime()))return {label:'Без срока',kind:'undated'};
   const today=new Date(),tomorrow=new Date(today);tomorrow.setDate(tomorrow.getDate()+1);
   return {label:sameDay(due,today)?'Сегодня':sameDay(due,tomorrow)?'Завтра':shortDate(due),kind:'upcoming'};

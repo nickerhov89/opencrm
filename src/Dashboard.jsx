@@ -30,7 +30,7 @@ function Metric({ title, value, change, tone = 'violet', footer, onClick }) {
 }
 
 export default function Dashboard({ accountName='OpenCRM', api, onError, deals, tasks, users, currentUser, onDeal, onTasks, onMenu }) {
-  const [period, setPeriod] = useState('month');
+  const [period, setPeriod] = useState('today');
   const [scope, setScope] = useState('all');
   const [query, setQuery] = useState('');
   const [eventsOpen, setEventsOpen] = useState(false);
