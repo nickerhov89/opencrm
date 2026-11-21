@@ -9,6 +9,7 @@
 
 ## Unreleased — closer to amoCRM
 
+- Distribution of new deals (Settings → Распределение, like the amoCRM widget): rules by pipeline, source and origin (API, accepted requests, created by hand) give new deals to managers in turn a few seconds after creation; the manager becomes the owner of the deal, its main contact, its company and its open tasks, then the rule's task («Связаться: Взять в работу», due at the end of the day) is created for them. Deals loaded with an old date are never redistributed. API: `/api/distribution/rules`.
 - Mail sync links letters to deals through an address index built once per run: a letter takes milliseconds instead of a scan of every deal (about 18 s per letter on 7500 deals).
 - `deals.source` mirrors the deal custom field «Источник» on every write (interface, API, import) without moving `updated_at` or sending `deal.updated`; deals loaded before are filled on start. The deal card hides the built-in «Источник» when the field exists.
 - Completed tasks in the deal feed show when they were completed and who completed them (`tasks.completed_by`), not the due date.

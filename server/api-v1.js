@@ -3,6 +3,7 @@
 // instance-wide service credentials: employee visibility settings do not apply to them, the stage
 // transition rules of pipelines do.
 import {createHash} from 'node:crypto';
+import {queueDistribution} from './distribution.js';
 import {RuleError} from './stage-rules.js';
 import {taskTypes} from '../src/task-types.js';
 import {emailSelect, emailView} from './mail.js';
@@ -502,6 +503,7 @@ export function registerApiV1(app, db, helpers) {
       await event(id, null, `Сделка создана ${via(req)}`);
       await saveCustom('deal', id, custom, via(req));
       await runStageAutomation(id, stage.id, saved.owner_id, null);
+      await queueDistribution(db, id, 'api');
       return id;
     });
     res.status(result.repeated ? 200 : 201).json({...await getDeal(result.id), repeated: result.repeated});
