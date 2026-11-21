@@ -398,6 +398,8 @@ CREATE INDEX IF NOT EXISTS idx_emails_sent ON emails(sent_at);
 -- History loaded from amoCRM keeps the event ID, so a repeated history load replaces it and leaves history written here alone.
 ALTER TABLE activity ADD COLUMN IF NOT EXISTS amo_event_id TEXT;
 ALTER TABLE entity_activity ADD COLUMN IF NOT EXISTS amo_event_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_activity_amo_event ON activity(amo_event_id) WHERE amo_event_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_entity_activity_amo_event ON entity_activity(amo_event_id) WHERE amo_event_id IS NOT NULL;
 CREATE OR REPLACE FUNCTION normalize_telegram(value text) RETURNS text LANGUAGE sql IMMUTABLE AS $$
   SELECT lower(regexp_replace(btrim(COALESCE(value, '')), '^(https?://)?(www[.])?((t|telegram)[.]me/)?@?', ''))
 $$;
