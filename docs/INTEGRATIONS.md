@@ -181,6 +181,23 @@ GET /api/v1/notes?entity_type=deal       # deal | contact | company (required); 
 
 Needs the read scope of that type. Items: `id`, `entity_type`, `entity_id`, `body`, `note_type`, `user_id`, `created_at`, `updated_at`, and `pinned` for deal notes. `note_type` is `common` for notes written in the interface or through the API; notes loaded from amoCRM keep its type (`call_in`, `call_out`, `amomail_message`, `service_message`, `attachment`, …). `GET /api/v1/deals/:id/notes`, `/contacts/:id/notes` and `/companies/:id/notes` return it too and accept `?note_type=`; the `note.created` webhook carries it. IDs of deal notes and of contact/company notes are separate sequences, so paginate one `entity_type` at a time.
 
+## E-mail
+
+Letters of the mailboxes connected in **Settings → Mail** ([MAIL.md](MAIL.md)). Both routes need the `emails:read` scope; `deals:read` alone does not show letters.
+
+```text
+GET /api/v1/deals/:id/emails        # letters linked to the deal, oldest first (up to 1000)
+GET /api/v1/emails                  # all stored letters; filters: deal_id, mailbox_id, linked=1|0, message_id, created_since; after/limit
+```
+
+`message_id=<id>` returns the letter with that Message-ID and the letters whose In-Reply-To is that ID. Each item:
+- identity and links: `id`, `mailbox_id`, `mailbox` (address of the mailbox), `deal_id` (`null` when not linked), `linked_by` (`thread`, `address`, `reply` for replies sent from the card, `manual`);
+- `direction`: `outgoing` when sent from a connected mailbox address;
+- headers: `message_id`, `in_reply_to`, `references` (array);
+- people: `from` `{address, name}`, `reply_to`, `to` and `cc` (arrays of `{address, name}`);
+- content: `subject`, `text` (plain text, HTML converted), `attachments` (`[{filename, content_type, size}]`, names only, files are not stored);
+- `sent_at`, and `user_id`/`author` for letters sent from the card.
+
 ## Employees
 
 `GET /api/v1/users` (`users:read`) returns `id`, `name`, `email`, `role`, `group_id`, `group_name`, `active`, `created_at`. Use the IDs as `owner_id` and `user_id`; disabled employees cannot be assigned.
