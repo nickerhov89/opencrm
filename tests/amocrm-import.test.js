@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {amoClient, exportAccount, readDump, loadDump, loadHistory} from '../scripts/amocrm-lib.mjs';
+import {amoClient, exportAccount, readDump, loadDump, loadHistory, syncHistoryFromAmo, historySettingKey} from '../scripts/amocrm-lib.mjs';
 
 // 2025-03-10 09:00 UTC and friends.
 const t = (iso) => Math.floor(Date.parse(iso) / 1000);
@@ -334,6 +334,31 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
     assert.equal(after.length, 10);
     assert.ok(after.includes('Написано в OpenCRM'));
     assert.equal(Number((await one('SELECT COUNT(*) n FROM webhook_events')).n), 0, 'the history load sends no webhooks');
+
+    // After a deploy the server loads the history straight from amoCRM once (when the export did not bring it).
+    const source = fixture();
+    const amoGet = async url => {
+      const u = new URL(url), page = Number(u.searchParams.get('page') || 1);
+      const lists = {'/api/v4/users': ['users', source.users], '/api/v4/leads/custom_fields': ['custom_fields', source.custom_fields_leads], '/api/v4/contacts/custom_fields': ['custom_fields', source.custom_fields_contacts], '/api/v4/companies/custom_fields': ['custom_fields', source.custom_fields_companies]};
+      if (u.pathname === '/api/v4/leads/pipelines') return {status: 200, body: JSON.stringify({_embedded: {pipelines: source.pipelines}})};
+      if (u.pathname === '/api/v4/events/types') return {status: 200, body: JSON.stringify({_embedded: {events_types: source.event_types}})};
+      if (u.pathname === '/api/v4/events') {
+        assert.deepEqual(u.searchParams.getAll('filter[entity][]'), ['lead', 'contact', 'company']);
+        const chunk = source.events_history.slice((page - 1) * 7, page * 7);
+        return {status: 200, body: JSON.stringify({_embedded: {events: chunk}, _links: page * 7 < source.events_history.length ? {next: {href: 'x'}} : {}})};
+      }
+      if (lists[u.pathname]) return {status: 200, body: JSON.stringify(page === 1 ? {_embedded: {[lists[u.pathname][0]]: lists[u.pathname][1]}} : {})};
+      return {status: 204, body: ''};
+    };
+    const amo = amoClient({baseUrl: 'https://agency.amocrm.ru', token: 't', minIntervalMs: 0, get: amoGet});
+    assert.equal(await syncHistoryFromAmo(db, amo, {log: quiet}), null, 'a load or history run with events marks the history as loaded');
+    await db.query('DELETE FROM app_settings WHERE key=$1', [historySettingKey]);
+    await db.query('DELETE FROM activity WHERE amo_event_id IS NOT NULL');
+    assert.deepEqual(await syncHistoryFromAmo(db, amo, {log: quiet}), {events: 13, activity: 9, entity_activity: 2});
+    const synced = (await call('/deals/21000001')).activity;
+    assert.deepEqual(synced.filter(a => a.event !== 'Написано в OpenCRM').map(a => [a.created_at, a.author, a.event]).reverse(), expectedHistory);
+    assert.equal(synced.length, 10, 'history from amoCRM is replaced, not doubled');
+    assert.equal(await syncHistoryFromAmo(db, amo, {log: quiet}), null, 'it runs once');
 
     // Triggers were off: no webhooks for loaded rows, timestamps kept.
     assert.equal(Number((await one('SELECT COUNT(*) n FROM webhook_events')).n), 0);
