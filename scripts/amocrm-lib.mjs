@@ -1,7 +1,9 @@
 // One-time move of an amoCRM account into OpenCRM: export through the amoCRM API v4 into JSON
 // files, then load them into PostgreSQL keeping the amoCRM IDs. See docs/AMOCRM_IMPORT.md.
-import {mkdir,readFile,rename,writeFile,access} from 'node:fs/promises';
-import {join} from 'node:path';
+import {mkdir,readFile,rename,writeFile,access,stat,unlink} from 'node:fs/promises';
+import {join,resolve,extname} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {randomBytes} from 'node:crypto';
 import http from 'node:http';
 import https from 'node:https';
 import tls from 'node:tls';
@@ -21,7 +23,7 @@ function httpsGet(url, headers, proxyUrl, timeoutMs = 60000) {
         ...(socket ? {agent: false, createConnection: () => tls.connect({socket, servername: target.hostname})} : {})}, response => {
         const chunks = [];
         response.on('data', chunk => chunks.push(chunk));
-        response.on('end', () => resolve({status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks).toString('utf8')}));
+        response.on('end', () => resolve({status: response.statusCode, headers: response.headers, raw: Buffer.concat(chunks), get body() { return this.raw.toString('utf8'); }}));
         response.on('error', reject);
       });
       request.on('timeout', () => request.destroy(new Error('timeout')));
@@ -74,6 +76,24 @@ export function amoClient({baseUrl, token, proxyUrl = '', minIntervalMs = 160, r
       return JSON.parse(response.body);
     }
   }
+  // Binary GET (files on amoCRM Drive). Redirects are followed; the token goes to amoCRM hosts only.
+  async function download(url) {
+    const trusted = host => host === base.hostname || /(^|\.)(amocrm\.(ru|com)|kommo\.com)$/i.test(host);
+    for (let hop = 0, attempt = 1; hop < 6;) {
+      const target = new URL(url);
+      const wait = last + minIntervalMs - Date.now();
+      if (wait > 0) await sleep(wait);
+      last = Date.now();
+      let response;
+      try { response = await get(target.href, {...(trusted(target.hostname) ? {Authorization: `Bearer ${token}`} : {}), 'User-Agent': 'opencrm-import'}, proxyUrl, 300000); }
+      catch (error) { if (attempt++ >= retries) throw error; await sleep(Math.min(30000, 1000 * 2 ** attempt)); continue; }
+      if ([301, 302, 303, 307, 308].includes(response.status) && response.headers?.location) { url = new URL(response.headers.location, target).href; hop++; continue; }
+      if ((response.status === 429 || response.status >= 500) && attempt++ < retries) { await sleep(Math.min(30000, 1500 * 2 ** attempt)); continue; }
+      if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
+      return {data: response.raw ?? Buffer.from(response.body ?? ''), type: String(response.headers?.['content-type'] || '').split(';')[0].trim()};
+    }
+    throw new Error('слишком много перенаправлений');
+  }
   async function list(path, key, params = {}, limit = 250, onPage = () => {}) {
     const items = [];
     for (let page = 1; ; page++) {
@@ -84,7 +104,7 @@ export function amoClient({baseUrl, token, proxyUrl = '', minIntervalMs = 160, r
       if (!chunk.length || !data._links?.next) return items;
     }
   }
-  return {request, list};
+  return {request, list, download};
 }
 
 // What is exported, file by file: [file, path, embedded key, params, page size].
@@ -112,9 +132,9 @@ export async function exportAccount({client, dir, force = false, log = console.l
   const counts = {};
   // The account and pipelines are small: they are always downloaded again.
   {
-    const account = await client.request('/api/v4/account', {with: 'task_types,datetime_settings'});
+    const account = await client.request('/api/v4/account', {with: 'task_types,datetime_settings,drive_url'});
     const timezone = account.datetime_settings?.timezone || account._embedded?.datetime_settings?.timezone || account.timezone || 'Europe/Moscow';
-    await saveJson(join(dir, 'account.json'), {id: account.id, name: account.name, subdomain: account.subdomain, timezone, task_types: account._embedded?.task_types || []});
+    await saveJson(join(dir, 'account.json'), {id: account.id, name: account.name, subdomain: account.subdomain, timezone, drive_url: account.drive_url || '', task_types: account._embedded?.task_types || []});
     log(`Аккаунт: ${account.name} (${account.subdomain}), часовой пояс ${timezone}`);
   }
   {
@@ -132,14 +152,56 @@ export async function exportAccount({client, dir, force = false, log = console.l
     counts[file] = items.length;
     log(`${file}: ${items.length}`);
   }
+  counts.files = await exportFiles({client, dir, log});
   await saveJson(join(dir, 'export-meta.json'), {exported_at: new Date().toISOString(), counts});
   return counts;
+}
+
+// Files attached to notes live on amoCRM Drive. Each goes to files/<note id>; files.json describes them.
+// A failed download is recorded and retried on the next run.
+async function exportFiles({client, dir, log}) {
+  const account = JSON.parse(await readFile(join(dir, 'account.json'), 'utf8'));
+  const listFile = join(dir, 'files.json');
+  const known = new Map((await exists(listFile) ? JSON.parse(await readFile(listFile, 'utf8')) : []).map(item => [item.note_id, item]));
+  await mkdir(join(dir, 'files'), {recursive: true});
+  const result = [];
+  for (const [file, entity] of [['notes_leads', 'leads'], ['notes_contacts', 'contacts'], ['notes_companies', 'companies']]) {
+    for (const note of JSON.parse(await readFile(join(dir, `${file}.json`), 'utf8'))) {
+      const p = note.params || {};
+      if (!p.file_uuid) continue;
+      const item = {note_id: note.id, entity, entity_id: note.entity_id, created_by: note.created_by, created_at: note.created_at, name: String(p.original_name || p.file_name || `file-${note.id}`), file_uuid: p.file_uuid};
+      const path = join(dir, 'files', String(note.id)), before = known.get(note.id);
+      if (before && !before.error && await exists(path)) { result.push(before); continue; }
+      try {
+        if (!account.drive_url) throw new Error('amoCRM не сообщил адрес Drive');
+        const drive = account.drive_url.replace(/\/+$/, '');
+        let href = '', mime = '';
+        try {
+          const meta = await client.request(`${drive}/v1.0/files/${p.file_uuid}`);
+          href = meta?._links?.download?.href || '';
+          mime = meta?.metadata?.mime_type || meta?.mime_type || '';
+        } catch (error) { if (/401|403/.test(error.message)) throw error; }
+        if (!href) href = `${drive}/download/${p.file_uuid}/${p.version_uuid}/${encodeURIComponent(p.file_name || item.name)}`;
+        const {data, type} = await client.download(href);
+        await writeFile(path, data);
+        result.push({...item, mime_type: mime || type || 'application/octet-stream', size: data.length});
+      } catch (error) {
+        result.push({...item, error: error.message});
+        log(`  файл ${item.name} (примечание ${note.id}): ${error.message}`);
+      }
+    }
+  }
+  await saveJson(listFile, result);
+  const failed = result.filter(item => item.error).length;
+  log(`files: ${result.length - failed}${failed ? `, не скачано ${failed} (повторный запуск export попробует снова)` : ''}`);
+  return result.length - failed;
 }
 
 export async function readDump(dir) {
   const read = async name => JSON.parse(await readFile(join(dir, `${name}.json`), 'utf8'));
   const dump = {account: await read('account'), pipelines: await read('pipelines')};
   for (const [file] of exportPlan) dump[file] = await read(file);
+  dump.files = await exists(join(dir, 'files.json')) ? (await read('files')).map(item => ({...item, path: join(dir, 'files', String(item.note_id))})) : [];
   return dump;
 }
 
@@ -171,9 +233,10 @@ function fieldType(type) {
 
 const presetTaskTypes = {1: 'Связаться', 2: 'Встреча', 3: 'Письмо'};
 
+const plain = value => value === null || value === undefined ? '' : typeof value === 'object' ? String(value.name ?? value.text ?? value.title ?? JSON.stringify(value)) : String(value).trim();
 function noteBody(note) {
   const p = note.params || {};
-  const text = String(p.text ?? '').trim();
+  const text = plain(p.text);
   switch (note.note_type) {
     case 'common': return text;
     case 'call_in': case 'call_out': {
@@ -188,8 +251,20 @@ function noteBody(note) {
       return lines.join('\n');
     }
     case 'sms_in': case 'sms_out': return `${note.note_type === 'sms_in' ? 'Входящее SMS' : 'Исходящее SMS'}${p.phone ? ` (${p.phone})` : ''}: ${text}`;
-    case 'service_message': case 'extended_service_message': return [p.service, text].filter(Boolean).join(': ');
+    case 'service_message': case 'extended_service_message': return [plain(p.service), plain(p.text)].filter(Boolean).join(': ');
     case 'attachment': return `Файл: ${p.original_name || p.file_name || 'без имени'}`;
+    case 'amomail_message': {
+      const who = person => person ? [person.name, person.email && `<${person.email}>`].filter(Boolean).join(' ') : '';
+      const lines = [p.income ? 'Входящее письмо' : 'Исходящее письмо'];
+      if (who(p.from)) lines.push(`От: ${who(p.from)}`);
+      if (who(p.to)) lines.push(`Кому: ${who(p.to)}`);
+      if (p.subject) lines.push(`Тема: ${p.subject}`);
+      if (Number(p.attach_cnt) > 0) lines.push(`Вложений: ${p.attach_cnt}`);
+      if (p.content_summary) lines.push('', String(p.content_summary));
+      return lines.join('\n');
+    }
+    case 'lead_auto_created': return `Сделка создана автоматически${p.type ? ` (${p.type})` : ''}`;
+    case 'link_followed': return `Переход по ссылке: ${p.url || ''}`;
     case 'geolocation': return [text, p.address].filter(Boolean).join('\n');
     default: return text || (Object.keys(p).length ? JSON.stringify(p) : '');
   }
@@ -360,14 +435,26 @@ export function transform(dump, existing = {users: [], maxStageId: 0}) {
     }
   }
 
+  // Files: kept next to the record the note belonged to.
+  const files = [];
+  const fileTargets = {leads: ['deal', dealIds], contacts: ['contact', contactIds], companies: ['company', companyIds]};
+  for (const item of dump.files || []) {
+    if (item.error) { warn('Файлы, которые не удалось скачать', `${item.name}: ${item.error}`); continue; }
+    const [type, ids] = fileTargets[item.entity] || [];
+    if (!type || !ids.has(item.entity_id)) { warn('Файлы удалённых записей пропущены', item.name); continue; }
+    files.push({entity_type: type, entity_id: item.entity_id, user_id: uid(item.created_by), filename: clip(String(item.name).split(/[\\/]/).pop().replace(/[\x00-\x1f\x7f]/g, '').trim() || `file-${item.note_id}`, 255), mime_type: clip(item.mime_type || 'application/octet-stream', 120), byte_size: item.size, created_at: toText(item.created_at) ?? toText(Date.now() / 1000), path: item.path});
+  }
+
   for (const field of rows.custom_fields) { field.options_json = JSON.stringify(field.options); delete field.options; delete field.amoType; }
-  return {rows, warnings, mergedUsers, closing: Object.fromEntries([...closing].map(([pipeline, ids]) => [pipeline, {won: ids[142], lost: ids[143]}]))};
+  return {rows, files, warnings, mergedUsers, closing: Object.fromEntries([...closing].map(([pipeline, ids]) => [pipeline, {won: ids[142], lost: ids[143]}]))};
 }
 
 // ---------------------------------------------------------------- load
 
 const loadOrder = ['users', 'pipelines', 'stages', 'custom_fields', 'companies', 'contacts', 'deals', 'deal_contacts', 'custom_field_values', 'tasks', 'notes', 'entity_notes', 'deal_stage_changes'];
-const businessTables = ['deals', 'contacts', 'companies', 'tasks', 'custom_fields', 'notes', 'entity_notes'];
+const businessTables = ['deals', 'contacts', 'companies', 'tasks', 'custom_fields', 'notes', 'entity_notes', 'attachments'];
+const projectRoot = fileURLToPath(new URL('..', import.meta.url));
+export const uploadDir = () => resolve(process.env.UPLOAD_DIR || join(projectRoot, 'data/uploads'));
 
 async function insertRows(db, table, rows) {
   if (!rows.length) return;
@@ -385,9 +472,11 @@ const count = async (db, sql, params = []) => Number((await db.query(sql, params
 // Removes the previous CRM data before a repeated load. Triggers (and ON DELETE actions) are off in
 // replica mode, so children are removed explicitly. Users, API keys, webhooks and settings stay.
 async function wipe(db, pipelineIds) {
-  if (await count(db, 'SELECT COUNT(*) n FROM attachments')) throw new Error('В CRM есть вложения: --replace их не удаляет. Удалите их в интерфейсе или загружайте в пустую базу');
+  const stored = (await db.query('SELECT stored_name FROM attachments')).rows.map(r => r.stored_name);
+  await db.query('DELETE FROM attachments');
   for (const sql of ['DELETE FROM custom_field_values', 'DELETE FROM custom_fields', 'DELETE FROM deal_contacts', 'DELETE FROM notes', 'DELETE FROM deal_communications', 'DELETE FROM activity', 'DELETE FROM deal_stage_changes', 'DELETE FROM tasks', 'DELETE FROM entity_notes', 'DELETE FROM entity_activity', 'UPDATE inbox_leads SET deal_id=NULL WHERE deal_id IS NOT NULL', 'DELETE FROM deals', 'DELETE FROM contacts', 'DELETE FROM companies']) await db.query(sql);
   await dropPipelines(db, pipelineIds);
+  return stored;
 }
 async function dropPipelines(db, ids) {
   if (!ids.length) return;
@@ -423,8 +512,9 @@ async function rekeyUsers(db, dump) {
 class DryRun extends Error {}
 
 // Loads an export in one transaction. dryRun: everything is written, checked and rolled back.
-export async function loadDump(db, dump, {dryRun = false, replace = false, keepDefaultPipeline = false, log = console.log} = {}) {
-  let report;
+export async function loadDump(db, dump, {dryRun = false, replace = false, keepDefaultPipeline = false, log = console.log, uploads = uploadDir()} = {}) {
+  let report, replaced = [];
+  const copied = [];
   try {
     await db.transaction(async () => {
       await db.query('SET LOCAL session_replication_role = replica');
@@ -433,13 +523,26 @@ export async function loadDump(db, dump, {dryRun = false, replace = false, keepD
       const amoPipelines = dump.pipelines.map(p => p.id);
       const busy = Object.entries(present).filter(([, n]) => n > 0);
       if (busy.length && !replace) throw new Error(`В CRM уже есть данные (${busy.map(([t, n]) => `${t}: ${n}`).join(', ')}). Загрузка идёт в пустую CRM; чтобы заменить данные, запустите с --replace`);
-      if (replace) await wipe(db, (await db.query('SELECT id FROM pipelines WHERE id = ANY($1)', [amoPipelines])).rows.map(r => Number(r.id)));
+      if (replace) replaced = await wipe(db, (await db.query('SELECT id FROM pipelines WHERE id = ANY($1)', [amoPipelines])).rows.map(r => Number(r.id)));
       else if ((await db.query('SELECT id FROM pipelines WHERE id = ANY($1)', [amoPipelines])).rows.length) throw new Error('Воронки с ID из amoCRM уже есть в CRM; для повторной загрузки используйте --replace');
       const rekeyed = await rekeyUsers(db, dump);
       const users = (await db.query('SELECT id,email FROM users')).rows.map(u => ({id: Number(u.id), email: u.email}));
       const maxStageId = await count(db, 'SELECT COALESCE(MAX(id),0) n FROM stages');
       const result = transform(dump, {users, maxStageId});
       for (const table of loadOrder) { await insertRows(db, table, result.rows[table]); log(`  ${table}: ${result.rows[table].length}`); }
+      // Files: checked in a dry run, copied into the upload folder otherwise (removed again on failure).
+      let fileBytes = 0;
+      if (result.files.length && !dryRun) await mkdir(uploads, {recursive: true});
+      for (const file of result.files) {
+        const info = await stat(file.path).catch(() => null);
+        if (!info || info.size !== file.byte_size) throw new Error(`Файл ${file.filename} не найден в выгрузке или повреждён: запустите export ещё раз`);
+        fileBytes += info.size;
+        const {path, ...row} = file;
+        row.stored_name = randomBytes(24).toString('hex');
+        if (!dryRun) { const target = resolve(uploads, row.stored_name); await writeFile(target, await readFile(path), {flag: 'wx', mode: 0o600}); copied.push(target); }
+        await insertRows(db, 'attachments', [row]);
+      }
+      log(`  attachments: ${result.files.length}`);
       // The seed pipeline of a fresh install goes away when nothing uses it.
       let droppedPipelines = [];
       if (!keepDefaultPipeline) {
@@ -458,9 +561,13 @@ export async function loadDump(db, dump, {dryRun = false, replace = false, keepD
       })) { const n = await count(db, sql); if (n) broken[name] = n; }
       if (Object.keys(broken).length) throw new Error(`Проверка целостности не прошла: ${JSON.stringify(broken)}`);
       const byStage = (await db.query('SELECT p.id pipeline_id, p.name pipeline, s.id stage_id, s.name stage, s.kind, COUNT(d.id) deals FROM pipelines p JOIN stages s ON s.pipeline_id=p.id LEFT JOIN deals d ON d.stage_id=s.id GROUP BY p.id,p.name,s.id,s.name,s.kind,s.sort_order,p.sort_order ORDER BY p.sort_order,p.id,s.sort_order')).rows.map(r => ({...r, pipeline_id: Number(r.pipeline_id), stage_id: Number(r.stage_id), deals: Number(r.deals)}));
-      report = {dry_run: dryRun, counts: Object.fromEntries(loadOrder.map(table => [table, result.rows[table].length])), closing_stages: result.closing, rekeyed_users: rekeyed, merged_users: result.mergedUsers, dropped_pipelines: droppedPipelines, warnings: result.warnings, deals_by_stage: byStage};
+      report = {dry_run: dryRun, counts: {...Object.fromEntries(loadOrder.map(table => [table, result.rows[table].length])), attachments: result.files.length}, attachment_bytes: fileBytes, closing_stages: result.closing, rekeyed_users: rekeyed, merged_users: result.mergedUsers, dropped_pipelines: droppedPipelines, warnings: result.warnings, deals_by_stage: byStage};
       if (dryRun) throw new DryRun();
     })();
-  } catch (error) { if (!(error instanceof DryRun)) throw error; }
+  } catch (error) {
+    if (!(error instanceof DryRun)) { await Promise.all(copied.map(path => unlink(path).catch(() => {}))); throw error; }
+  }
+  // Files of records removed by --replace go once the new data is committed.
+  if (!dryRun) await Promise.all(replaced.map(name => unlink(resolve(uploads, name)).catch(() => {})));
   return report;
 }
