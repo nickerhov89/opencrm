@@ -14,16 +14,21 @@
 //       checks and rolls everything back, printing the same report. --replace first removes deals,
 //       contacts, companies, tasks, notes, custom fields, attachments and the pipelines with amoCRM IDs.
 //       The report is also saved as DIR/load-report.json.
+//
+//   node scripts/amocrm-import.mjs history [--dir DIR] [--dry-run]
+//       Adds only the card history (field changes, tags, responsible, links, stages...) of the export
+//       to a CRM where it is already loaded; everything else stays. History loaded this way before is
+//       replaced, history written in OpenCRM stays.
 import {writeFile} from 'node:fs/promises';
 import {join, resolve} from 'node:path';
 import {createDb} from '../server/db.js';
-import {amoClient, exportAccount, readDump, loadDump} from './amocrm-lib.mjs';
+import {amoClient, exportAccount, readDump, loadDump, loadHistory} from './amocrm-lib.mjs';
 
 const [command, ...args] = process.argv.slice(2);
 const flag = name => args.includes(name);
 const option = (name, fallback) => { const index = args.indexOf(name); return index >= 0 && args[index + 1] ? args[index + 1] : fallback; };
 const dir = resolve(option('--dir', 'data/amocrm-export'));
-const usage = 'Использование:\n  node scripts/amocrm-import.mjs export [--dir DIR] [--force]\n  node scripts/amocrm-import.mjs load [--dir DIR] [--dry-run] [--replace] [--keep-default-pipeline]';
+const usage = 'Использование:\n  node scripts/amocrm-import.mjs export [--dir DIR] [--force]\n  node scripts/amocrm-import.mjs load [--dir DIR] [--dry-run] [--replace] [--keep-default-pipeline]\n  node scripts/amocrm-import.mjs history [--dir DIR] [--dry-run]';
 
 try {
   if (command === 'export') {
@@ -46,6 +51,15 @@ try {
       for (const [text, {count, examples}] of Object.entries(report.warnings)) console.log(`Внимание: ${text}: ${count}${examples.length ? ` (например ${examples.join('; ')})` : ''}`);
       console.log(`\nСделки по этапам — в ${join(dir, 'load-report.json')}`);
       if (!report.dry_run) console.log('Пароли сотрудникам: node scripts/admin.mjs reset-password <email> или «Настройки → Пользователи».');
+    } finally { await db.close(); }
+  } else if (command === 'history') {
+    const dump = await readDump(dir);
+    if (dump.events_history == null) throw new Error(`В ${dir} нет events_history.json: запустите export ещё раз (уже скачанные файлы не перекачиваются)`);
+    const db = await createDb();
+    try {
+      console.log(`${flag('--dry-run') ? 'Пробная загрузка истории (с откатом)' : 'Загрузка истории'} из ${dir}`);
+      const report = await loadHistory(db, dump, {dryRun: flag('--dry-run')});
+      console.log(`\nИстория${report.dry_run ? ' (откачено, это пробный прогон)' : ''}: сделки ${report.counts.activity}, контакты и компании ${report.counts.entity_activity}; заменено ранее загруженной ${report.replaced.activity + report.replaced.entity_activity}; пропущено событий записей, которых нет в CRM: ${report.skipped.activity + report.skipped.entity_activity}`);
     } finally { await db.close(); }
   } else { console.error(usage); process.exitCode = 1; }
 } catch (error) { console.error(`Ошибка: ${error.message}`); process.exitCode = 1; }

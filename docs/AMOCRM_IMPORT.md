@@ -12,7 +12,7 @@ Run the commands in the app container (`docker compose -p opencrm exec opencrm .
    docker compose -p opencrm exec -e AMO_BASE_URL=https://<subdomain>.amocrm.ru -e AMO_ACCESS_TOKEN=<token> opencrm node scripts/amocrm-import.mjs export
    ```
 
-   The files go to `data/amocrm-export` (`--dir` changes it; in the container this is the `opencrm_data` volume, which is not part of backups). `AMO_PROXY_URL=http://[user:password@]host:port` sends the API requests through an HTTP CONNECT proxy (a host the proxy refuses is then reached directly; files go directly first and through the proxy after a network error); `AMO_RPS` (default 3, at most 7) limits requests per second, because the token's limit is shared with other integrations that use it. Network errors and HTTP 429/5xx are retried. Files already downloaded are kept, so a broken export continues where it stopped; `--force` downloads everything again. Exported: users, pipelines with statuses, custom fields of deals, contacts and companies, companies, contacts, deals with their contacts and loss reasons, tasks, notes of deals, contacts and companies, the `lead_status_changed` events, and the files attached to notes (downloaded from amoCRM Drive into `files/`; a file that fails is retried on the next run). Deleted records, calls as separate entities and other events are not exported.
+   The files go to `data/amocrm-export` (`--dir` changes it; in the container this is the `opencrm_data` volume, which is not part of backups). `AMO_PROXY_URL=http://[user:password@]host:port` sends the API requests through an HTTP CONNECT proxy (a host the proxy refuses is then reached directly; files go directly first and through the proxy after a network error); `AMO_RPS` (default 3, at most 7) limits requests per second, because the token's limit is shared with other integrations that use it. Network errors and HTTP 429/5xx are retried. Files already downloaded are kept, so a broken export continues where it stopped; `--force` downloads everything again. Exported: users, pipelines with statuses, custom fields of deals, contacts and companies, companies, contacts, deals with their contacts and loss reasons, tasks, notes of deals, contacts and companies, the `lead_status_changed` events, all events of deals, contacts and companies (`events_history.json`, the history of the cards) with the names of event types, and the files attached to notes (downloaded from amoCRM Drive into `files/`; a file that fails is retried on the next run). Deleted records and calls as separate entities are not exported. E-mails of the amoCRM mail module are not available through the API: only the old `amomail_message` notes come over.
 
 2. Trial load. `load --dry-run` writes everything in a transaction, runs the checks and rolls back:
 
@@ -34,6 +34,27 @@ Run the commands in the app container (`docker compose -p opencrm exec opencrm .
 
 5. Delete the export folder: it holds customers' personal data.
 
+### Adding the history to a CRM loaded earlier
+
+Exports made before the card history was added have no `events_history.json`. The simplest way is automatic: put the amoCRM address and token into `.env` next to `compose.yaml`
+
+```sh
+AMO_BASE_URL=https://<subdomain>.amocrm.ru
+AMO_ACCESS_TOKEN=<long-lived token>
+# AMO_PROXY_URL=http://[user:password@]host:port   if amoCRM is reached through a proxy
+```
+
+and deploy (or `docker compose -p opencrm up -d`). After start the server downloads the events of deals, contacts and companies in the background and writes the history of the records already in the CRM; the log shows the progress (`docker compose -p opencrm logs -f opencrm | grep amoCRM`). It happens once: the CRM remembers it (`app_settings` key `amocrm_history_loaded`; a `load` or `history` with events sets it too), and a run interrupted by a restart starts again from the beginning on the next start. Afterwards the token can be removed from `.env`.
+
+By hand instead: run `export` again — the files already downloaded are kept, only the history is fetched — and then:
+
+```sh
+docker compose -p opencrm exec opencrm node scripts/amocrm-import.mjs history --dry-run
+docker compose -p opencrm exec opencrm node scripts/amocrm-import.mjs history
+```
+
+Only `activity` and `entity_activity` change: history loaded from amoCRM before (rows with `amo_event_id`) is replaced, history written in OpenCRM stays, events of records missing in the CRM are skipped. No webhooks are sent.
+
 What the script does with the data:
 
 - One transaction with triggers off (`session_replication_role = replica`): no webhooks, no extra history, timestamps from amoCRM. Afterwards it checks references, moves the ID sequences past the loaded IDs and switches the triggers back on, so new records get numbers above the amoCRM ones and everything works as usual.
@@ -43,6 +64,7 @@ What the script does with the data:
 - Notes of every type become text and keep the amoCRM type in `note_type` (notes written in OpenCRM are `common`): call notes include the phone, duration, result and recording link, e-mails the sender, recipient, subject and summary.
 - Files become attachments of the same deal, contact or company, with the author and date of the note; a file note stays in the feed as «Файл: …». A dry run checks the files without copying them.
 - Stage history: a creation row per deal and a row per `lead_status_changed` event, with the employee and time.
+- Card history: every event of a deal goes into its history (`activity`), of a contact or company into theirs (`entity_activity`), with the employee, the time and the amoCRM event ID in `amo_event_id`, worded like OpenCRM's own history: «Сделка создана», «Этап изменён: …», «Поле «Email»: — → …», «Поле «Ответственный»: …», «Поле «Бюджет»: …», «Теги добавлены: …», «Контакт привязан: …», and so on; other types get their amoCRM name. Events that only point at a note (notes, calls, SMS, files) are skipped, since the notes come over themselves. As in amoCRM, the deal feed also shows the history of the deal's contacts and company, with a link to the card it belongs to.
 
 ## Manual load
 
@@ -84,7 +106,7 @@ All timestamps are UTC text `YYYY-MM-DD HH:MM:SS` (task `due_at` and `completed_
 | `entity_notes` | Contact and company notes: `id`, `entity_type`, `entity_id`, `user_id`, `body`, `created_at`, `updated_at`. |
 | `deal_stage_changes` | Stage history from amoCRM `lead_status_changed` events: `deal_id`, `from_stage_id`, `from_pipeline_id`, `to_stage_id`, `to_pipeline_id`, `user_id`, `changed_at`. Add one row per deal for its creation with `from_*` empty. The `id` may be left to the database. Replace 142/143 in `from_stage_id` and `to_stage_id` with the won/lost stage of the pipeline named in the event (`value_before` / `value_after[0].lead_status.pipeline_id`). Stages deleted in amoCRM may stay with their old IDs: the stage columns of this table have no foreign keys. |
 
-Activity history in the deal card (`activity`, `entity_activity`) is free text; loading it is optional.
+Activity history in the deal card (`activity`, `entity_activity`) is free text; loading it is optional. Rows from another system should carry its event ID in `amo_event_id`, so a repeated load can replace them.
 
 ## After the load
 
