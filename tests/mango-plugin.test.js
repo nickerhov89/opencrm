@@ -73,7 +73,7 @@ test('Mango Office: звонки в ленту сделки, «Неразобр�
 
   try {
     const admin = await request('/setup', 'POST', {name: 'Админ', email: 'admin@example.test', password: 'passphrase-for-tests'});
-    await request('/admin/plugins', 'POST', pluginZip(), 201, {'Content-Type': 'application/zip'});
+    await request('/admin/plugins', 'POST', pluginZip(), 201, {'Content-Type': 'application/zip', 'X-Confirm-Password': 'passphrase-for-tests'});
     await request('/admin/plugins/mango-office', 'PATCH', {settings: {api_key: key, api_salt: salt, employees: '101 = ADMIN@example.test\n102 = nobody@example.test\nмусор', api_url: `http://127.0.0.1:${mango.address().port}/vpbx`}});
     const state = await request('/admin/plugins/mango-office', 'PATCH', {enabled: true});
     assert.equal(state.status, 'active', state.error);

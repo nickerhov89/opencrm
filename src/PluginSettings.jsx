@@ -76,6 +76,24 @@ function PluginDetails({plugin, busy, uploadEnabled, onBack, onToggle, onSave, o
   </div>;
 }
 
+// Plugin code runs inside the CRM with access to everything, so installing or updating one is confirmed
+// with the administrator's password and, when two-factor sign-in is on, a code.
+function ConfirmInstall({pending, totp, busy, onCancel, onConfirm}) {
+  const [password, setPassword] = useState(''), [code, setCode] = useState('');
+  const title = pending.plugin ? `Обновление «${pending.plugin.name}»` : 'Установка плагина';
+  return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onCancel(); }}>
+    <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
+      <div className="modal-head"><h2>{title}</h2><button type="button" onClick={onCancel} aria-label="Закрыть">×</button></div>
+      <form className="modal-form" onSubmit={event => { event.preventDefault(); onConfirm(password, code); }}>
+        <p className="plugin-confirm-text">Файл «{pending.file.name}». Плагин получит доступ ко всем данным CRM и к серверу, поэтому подтвердите установку{totp ? ' паролем и кодом из приложения' : ' паролем'}.</p>
+        <label>Текущий пароль<input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} required autoFocus/></label>
+        {totp && <label>Код из приложения-аутентификатора<input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9 ]{6,7}" maxLength={7} value={code} onChange={event => setCode(event.target.value)} required/></label>}
+        <div className="modal-actions"><button type="button" onClick={onCancel}>Отмена</button><button type="submit" className="blue-btn" disabled={busy || !password || (totp && !code.trim())}>{pending.plugin ? 'ОБНОВИТЬ' : 'УСТАНОВИТЬ'}</button></div>
+      </form>
+    </div>
+  </div>;
+}
+
 export default function PluginSettings({api, onError}) {
   const [data, setData] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -93,8 +111,11 @@ export default function PluginSettings({api, onError}) {
   useEffect(() => { const element = scroller(); if (element) element.scrollTop = openId ? 0 : listScroll.current; }, [openId]);
   const open = id => { listScroll.current = scroller()?.scrollTop || 0; setOpenId(id); setNotice(''); };
   const back = () => { setOpenId(null); setNotice(''); };
-  const send = async (file, expect) => {
-    const response = await fetch(appPath(`/api/admin/plugins${expect ? `?expect=${encodeURIComponent(expect)}` : ''}`), {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/zip'}, body: file});
+  const [pending, setPending] = useState(null);
+  const [totp, setTotp] = useState(false);
+  useEffect(() => { api('/me').then(me => setTotp(!!me.totp_enabled)).catch(() => {}); }, []);
+  const send = async (file, expect, password, code) => {
+    const response = await fetch(appPath(`/api/admin/plugins${expect ? `?expect=${encodeURIComponent(expect)}` : ''}`), {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/zip', 'X-Confirm-Password': encodeURIComponent(password), 'X-Confirm-Code': code.replace(/\s+/g, '')}, body: file});
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || `Ошибка ${response.status}`);
     return {result, created: response.status === 201};
@@ -102,17 +123,21 @@ export default function PluginSettings({api, onError}) {
   const upload = event => {
     const file = event.target.files?.[0];
     event.target.value = '';
-    if (!file) return;
-    void action(async () => {
-      const {result, created} = await send(file);
+    if (file) setPending({file});
+  };
+  const update = (plugin, file) => setPending({file, plugin});
+  // The dialog stays open after a wrong password, so the administrator can try again.
+  const install = (password, code) => void action(async () => {
+    const {file, plugin} = pending;
+    const {result, created} = await send(file, plugin?.id, password, code);
+    setPending(null);
+    if (plugin) setNotice(result.version === plugin.version ? `«${plugin.name}» переустановлен, версия ${result.version}.` : `«${plugin.name}» обновлён: ${plugin.version} → ${result.version}.`);
+    else {
       setOpenId(result.id);
       setNotice(created ? `Плагин «${result.name}» установлен. Проверьте настройки и включите его.` : `Плагин «${result.name}» обновлён до версии ${result.version}.`);
-    });
-  };
-  const update = (plugin, file) => void action(async () => {
-    const {result} = await send(file, plugin.id);
-    setNotice(result.version === plugin.version ? `«${plugin.name}» переустановлен, версия ${result.version}.` : `«${plugin.name}» обновлён: ${plugin.version} → ${result.version}.`);
+    }
   });
+  const confirmBox = pending && <ConfirmInstall pending={pending} totp={totp} busy={busy} onCancel={() => setPending(null)} onConfirm={install}/>;
   const toggle = plugin => void action(async () => {
     const result = await api(`/admin/plugins/${plugin.id}`, {method: 'PATCH', body: {enabled: !plugin.enabled}});
     setNotice(result.status === 'error' ? '' : result.enabled ? `«${plugin.name}» включён.` : `«${plugin.name}» выключен.`);
@@ -127,6 +152,7 @@ export default function PluginSettings({api, onError}) {
   if (current) return <div className="settings-body plugins-admin" ref={rootRef}>
     {noticeBox}
     <PluginDetails plugin={current} busy={busy} uploadEnabled={data.upload_enabled} onBack={back} onToggle={toggle} onSave={save} onDelete={remove} onCopy={copy} onUpdate={update}/>
+    {confirmBox}
   </div>;
   return <div className="settings-body plugins-admin" ref={rootRef}>
     <div className="settings-section-heading">
@@ -144,5 +170,6 @@ export default function PluginSettings({api, onError}) {
         {shown.length ? <div className="plugin-grid">{shown.map(plugin => <PluginTile key={plugin.id} plugin={plugin} onOpen={open}/>)}</div> : <p className="settings-no-results">Ничего не найдено.</p>}
       </>
       : <section className="settings-card"><p className="settings-no-results">Плагинов пока нет. Загрузите ZIP-архив плагина или положите папку плагина в каталог плагинов на сервере.</p></section>}
+    {confirmBox}
   </div>;
 }

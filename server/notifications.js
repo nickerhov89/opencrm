@@ -25,7 +25,9 @@ export function registerNotifications(app, db, {auth}) {
     for (const message of await unreadChat(db, user.id, iso(new Date(now.getTime() - 30 * 864e5)).slice(0, 19).replace('T', ' ')))
       items.push({id: `chat:${message.id}`, kind: 'chat', title: `Чат: ${message.deal_name}`, text: `${message.author || 'Сотрудник'}: ${message.body.replace(/\s+/g, ' ').slice(0, 160)}`, subtitle: '', at: message.created_at, deal_id: message.deal_id});
     if (admin || user.permissions?.deal?.create === true) {
-      const leads = await db.prepare("SELECT id,title,contact_name,company_name,phone,email,created_at FROM inbox_leads WHERE status='pending' AND created_at>=? ORDER BY id DESC LIMIT 50").all(iso(week).slice(0, 19).replace('T', ' '));
+      // «Only own deals» employees see only the requests they added themselves (as in «Неразобранное»).
+      const own = !admin && user.deal_access === 'own';
+      const leads = await db.prepare(`SELECT id,title,contact_name,company_name,phone,email,created_at FROM inbox_leads WHERE status='pending' AND created_at>=?${own ? ' AND created_by=?' : ''} ORDER BY id DESC LIMIT 50`).all(iso(week).slice(0, 19).replace('T', ' '), ...(own ? [user.id] : []));
       for (const lead of leads) items.push({id: `lead:${lead.id}`, kind: 'lead', title: 'Новая заявка', text: lead.title, subtitle: [lead.contact_name, lead.company_name, lead.phone, lead.email].filter(Boolean).join(', '), at: lead.created_at, lead_id: lead.id});
     }
     const stamp = value => { const text = String(value || ''); return Date.parse(text.includes('T') ? text : text.replace(' ', 'T') + 'Z') || 0; };

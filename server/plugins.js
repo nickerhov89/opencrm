@@ -125,7 +125,7 @@ const withTimeout = (promise, ms, label) => {
   return Promise.race([Promise.resolve(promise), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label}: нет ответа за ${ms / 1000} с`)), ms); timer.unref?.(); })]).finally(() => clearTimeout(timer));
 };
 
-export function registerPlugins(app, db, {auth, admin, audit = async () => {}, uploadDir, dir = pluginsDir(uploadDir), secretFile = secretFilePath(uploadDir)}) {
+export function registerPlugins(app, db, {auth, admin, audit = async () => {}, confirmDangerousAction = async () => ({status: 403, error: 'Загрузка плагинов не настроена'}), uploadDir, dir = pluginsDir(uploadDir), secretFile = secretFilePath(uploadDir)}) {
   const runtimes = new Map(), logs = new Map(), errors = new Map();
   const box = createSecretBox(secretFile);
   const uploadEnabled = () => process.env.OPENCRM_PLUGIN_UPLOAD !== '0';
@@ -413,6 +413,9 @@ export function registerPlugins(app, db, {auth, admin, audit = async () => {}, u
   app.post('/api/admin/plugins', auth, admin, express.raw({type: () => true, limit: '20mb'}), async (req, res) => {
     try {
       if (!uploadEnabled()) throw new PluginError('Загрузка плагинов через интерфейс выключена (OPENCRM_PLUGIN_UPLOAD=0). Установите плагин на сервере: npm run plugin -- install <файл.zip>', 403);
+      // Plugin code gets the whole server: the administrator confirms with the password (and the 2FA code).
+      const refused = await confirmDangerousAction(req);
+      if (refused) throw new PluginError(refused.error, refused.status);
       if (!Buffer.isBuffer(req.body) || !req.body.length) bad('Пришлите ZIP-архив плагина');
       const pkg = packageFiles(readZip(req.body));
       if (req.query.expect && pkg.manifest.id !== req.query.expect) bad(`В архиве другой плагин («${pkg.manifest.name}», ${pkg.manifest.id}), а не ${req.query.expect}. Для установки нового плагина используйте кнопку «Загрузить плагин» в списке.`);

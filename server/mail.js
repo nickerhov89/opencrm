@@ -11,6 +11,7 @@
 import {createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, sign} from 'node:crypto';
 import {mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {dirname, resolve} from 'node:path';
+import {createRateLimiter} from './security.js';
 
 // The mail libraries load on first use, so they do not slow down the start of the server.
 let libraries;
@@ -359,10 +360,12 @@ const recipientList = (list, name, required) => {
 };
 // A new letter (not a reply) from a connected mailbox; with dealId it goes to that deal, otherwise
 // the usual address rules find one.
-export async function sendNew(db, box, {mailboxId, user, to, cc, subject, text, dealId = null}) {
+const recipientCap = (toList, ccList, max) => { if (toList.length + ccList.length > max) bad(`Не больше ${max} получателей в одном письме (вместе с копией)`); };
+export async function sendNew(db, box, {mailboxId, user, to, cc, subject, text, dealId = null, maxRecipients = Infinity}) {
   const mailbox = await db.prepare('SELECT * FROM mailboxes WHERE id=? AND enabled=1').get(Number(mailboxId) || 0);
   if (!mailbox) bad('Выберите подключённый ящик');
   const toList = recipientList(to, 'to', true), ccList = recipientList(cc, 'cc').filter(address => !toList.includes(address));
+  recipientCap(toList, ccList, maxRecipients);
   if (typeof subject !== 'string' || subject.length > 998) bad('Тема: до 998 символов');
   if (typeof text !== 'string' || !text.trim() || text.length > 50000) bad('Напишите текст письма');
   const sent = await deliver(db, box, mailbox, {to: toList, cc: ccList, subject: subject.trim(), text: text.trim()});
@@ -372,7 +375,7 @@ export async function sendNew(db, box, {mailboxId, user, to, cc, subject, text, 
   return await db.prepare('SELECT * FROM emails WHERE message_id=?').get(sent.message_id);
 }
 
-export async function sendReply(db, box, {original, user, text, to, cc, all = false, withQuote = true}) {
+export async function sendReply(db, box, {original, user, text, to, cc, all = false, withQuote = true, maxRecipients = Infinity}) {
   const mailbox = original.mailbox_id && await db.prepare('SELECT * FROM mailboxes WHERE id=?').get(original.mailbox_id);
   if (!mailbox) throw new MailError(409, 'Ящик этого письма отключён от CRM — ответить из карточки нельзя');
   if (!mailbox.enabled) throw new MailError(409, `Ящик ${mailbox.email} выключен в настройках почты`);
@@ -381,6 +384,7 @@ export async function sendReply(db, box, {original, user, text, to, cc, all = fa
   const check = (list, name) => { if (list === undefined) return undefined; if (!Array.isArray(list) || list.length > 50 || list.some(item => !validEmail(lower(item)))) bad(`${name}: список адресов e-mail`); return [...new Set(list.map(lower))]; };
   const toList = check(to, 'to') ?? defaults.to, ccList = check(cc, 'cc') ?? defaults.cc;
   if (!toList.length) bad('Укажите получателя');
+  recipientCap(toList, ccList.filter(address => !toList.includes(address)), maxRecipients);
   if (typeof text !== 'string' || !text.trim() || text.length > 50000) bad('Напишите текст ответа');
   const body = withQuote && letter.body ? `${text.trim()}\n\n${quote(letter)}` : text.trim();
   const references = [...new Set([...letter.references, letter.message_id])].slice(-50);
@@ -409,7 +413,7 @@ const host = value => { const text = clean(value, 255).toLowerCase(); if (!/^[a-
 function mailboxView(row, box) {
   let account = null;
   if (row.auth_type === 'google_sa') { try { account = box.open(row.secret)?.service_account?.client_email || null; } catch { account = null; } }
-  return {id: row.id, email: row.email, name: row.name, auth_type: row.auth_type, imap_host: row.imap_host, imap_port: row.imap_port, smtp_host: row.smtp_host, smtp_port: row.smtp_port, username: row.username, service_account: account, history_days: row.history_days, enabled: !!row.enabled, last_sync_at: row.last_sync_at, last_error: row.last_error, syncing: running.has(row.id), emails: Number(row.emails || 0), unlinked: Number(row.unlinked || 0), created_at: row.created_at};
+  return {id: row.id, email: row.email, name: row.name, auth_type: row.auth_type, imap_host: row.imap_host, imap_port: row.imap_port, smtp_host: row.smtp_host, smtp_port: row.smtp_port, username: row.username, service_account: account, history_days: row.history_days, enabled: !!row.enabled, last_sync_at: row.last_sync_at, last_error: row.last_error, syncing: running.has(row.id), emails: Number(row.emails || 0), unlinked: Number(row.unlinked || 0), user_ids: json(row.user_ids || '[]', []).map(Number), created_at: row.created_at};
 }
 
 async function checkConnection(mailbox, secret) {
@@ -476,20 +480,64 @@ export function registerMail(app, db, {auth, admin, audit, requirePermission, se
     catch (error) { if (error instanceof MailError) return res.status(error.status).json({error: error.message}); if (error?.message?.startsWith('Google не дал') || error?.message?.startsWith('Ключ сервисного')) return res.status(400).json({error: error.message}); next(error); }
   };
   const startSync = id => { void syncMailbox(db, box, id).catch(error => console.error(`Почта, ящик ${id}:`, error.message)); };
-  const listMailboxes = async () => (await db.prepare('SELECT m.*,(SELECT COUNT(*) FROM emails e WHERE e.mailbox_id=m.id) emails,(SELECT COUNT(*) FROM emails e WHERE e.mailbox_id=m.id AND e.deal_id IS NULL) unlinked FROM mailboxes m ORDER BY m.id').all()).map(row => mailboxView(row, box));
+  const listMailboxes = async () => (await db.prepare("SELECT m.*,(SELECT COUNT(*) FROM emails e WHERE e.mailbox_id=m.id) emails,(SELECT COUNT(*) FROM emails e WHERE e.mailbox_id=m.id AND e.deal_id IS NULL) unlinked,(SELECT COALESCE(json_agg(mu.user_id ORDER BY mu.user_id),'[]'::json) FROM mailbox_users mu WHERE mu.mailbox_id=m.id) user_ids FROM mailboxes m ORDER BY m.id").all()).map(row => mailboxView(row, box));
+
+  // ---------- who may send ----------
+  // A letter goes out from a mailbox only for an administrator, the employee whose e-mail the mailbox
+  // is, or an employee the administrator added to the mailbox (Settings -> Mail); writing letters also
+  // needs the right to edit deals. Every sender is limited to MAIL_SEND_PER_HOUR letters an hour
+  // (default 50) and every letter to MAIL_MAX_RECIPIENTS addresses with the copy (default 10), so a
+  // stolen or careless account cannot mass-mail from the company's addresses.
+  const envInt = (name, fallback, max) => { const raw = Number(process.env[name]); return Number.isSafeInteger(raw) && raw > 0 && raw <= max ? raw : fallback; };
+  const maxRecipients = envInt('MAIL_MAX_RECIPIENTS', 10, 100), perHour = envInt('MAIL_SEND_PER_HOUR', 50, 10000);
+  const sendLimiter = createRateLimiter({limit: perHour, windowMs: 3600000});
+  const mayWrite = req => req.user.role === 'admin' || req.user.permissions?.deal?.edit === true;
+  const senderMailboxes = async (req, {enabledOnly = true} = {}) => {
+    if (!mayWrite(req)) return [];
+    const enabled = enabledOnly ? ' AND m.enabled=1' : '';
+    if (req.user.role === 'admin') return db.prepare(`SELECT m.id,m.email,m.name FROM mailboxes m WHERE TRUE${enabled} ORDER BY m.id`).all();
+    return db.prepare(`SELECT m.id,m.email,m.name FROM mailboxes m WHERE (lower(m.email)=lower(?) OR EXISTS (SELECT 1 FROM mailbox_users mu WHERE mu.mailbox_id=m.id AND mu.user_id=?))${enabled} ORDER BY m.id`).all(req.user.email, req.user.id);
+  };
+  async function sendAs(req, mailboxId, send) {
+    if (!mayWrite(req)) throw new MailError(403, 'Нет прав на это действие');
+    // Without a mailbox (deleted, or none chosen) the send function itself explains what is wrong.
+    if (mailboxId != null && req.user.role !== 'admin' && !(await senderMailboxes(req, {enabledOnly: false})).some(item => Number(item.id) === Number(mailboxId))) throw new MailError(403, 'Нет доступа к этому ящику. Администратор добавляет сотрудников к ящику в «Настройки → Почта»');
+    const key = `user:${req.user.id}`, retry = sendLimiter.hit(key);
+    if (retry) throw new MailError(429, `Слишком много писем: не больше ${perHour} в час. Повторите через ${Math.ceil(retry / 60)} мин.`);
+    try { return await send(); } catch (error) { sendLimiter.refund(key); throw error; }
+  }
+  async function saveMailboxUsers(id, raw) {
+    if (raw === undefined) return null;
+    if (!Array.isArray(raw) || raw.length > 1000) bad('user_ids: список ID сотрудников');
+    const ids = [...new Set(raw.map(Number))];
+    if (ids.some(userId => !Number.isSafeInteger(userId) || userId < 1)) bad('user_ids: список ID сотрудников');
+    if (ids.length && Number((await db.prepare(`SELECT COUNT(*) n FROM users WHERE id IN (${ids.map(() => '?').join(',')})`).get(...ids)).n) !== ids.length) bad('Сотрудник не найден');
+    await db.transaction(async () => {
+      await db.prepare('DELETE FROM mailbox_users WHERE mailbox_id=?').run(id);
+      for (const userId of ids) await db.prepare('INSERT INTO mailbox_users (mailbox_id,user_id) VALUES (?,?)').run(id, userId);
+    })();
+    return ids;
+  }
 
   app.get('/api/mail/mailboxes', auth, admin, route(async (_req, res) => res.json(await listMailboxes())));
   app.post('/api/mail/mailboxes', auth, admin, route(async (req, res) => {
+    if (req.body?.user_ids !== undefined && !Array.isArray(req.body.user_ids)) bad('user_ids: список ID сотрудников');
     const {id, settings, details} = await addMailbox(db, box, req.body);
-    await audit(req, 'mailbox.created', {target: `mailbox:${id} ${settings.email}`, details});
+    const users = await saveMailboxUsers(id, req.body?.user_ids);
+    await audit(req, 'mailbox.created', {target: `mailbox:${id} ${settings.email}`, details: [details, users?.length && `отправляют: ${users.join(', ')}`].filter(Boolean).join('; ')});
     if (settings.enabled && process.env.NODE_ENV !== 'test') startSync(id);
     res.status(201).json((await listMailboxes()).find(item => item.id === id));
   }));
   app.patch('/api/mail/mailboxes/:id', auth, admin, route(async (req, res) => {
     const old = await db.prepare('SELECT * FROM mailboxes WHERE id=?').get(Number(req.params.id) || 0);
     if (!old) throw new MailError(404, 'Ящик не найден');
-    const body = req.body || {}, {settings, credentialsChanged, details} = await changeMailbox(db, box, old, body);
-    await audit(req, 'mailbox.updated', {target: `mailbox:${old.id} ${old.email}`, details});
+    const body = req.body || {};
+    if (body.user_ids !== undefined && !Array.isArray(body.user_ids)) bad('user_ids: список ID сотрудников');
+    // Changing only who sends leaves the mailbox settings (and its connection check) alone.
+    const onlyUsers = Object.keys(body).length > 0 && Object.keys(body).every(key => key === 'user_ids');
+    const {settings, credentialsChanged, details} = onlyUsers ? {settings: {enabled: !!old.enabled}, credentialsChanged: false, details: ''} : await changeMailbox(db, box, old, body);
+    const users = await saveMailboxUsers(old.id, body.user_ids);
+    await audit(req, 'mailbox.updated', {target: `mailbox:${old.id} ${old.email}`, details: [details, users && `отправляют: ${users.join(', ') || 'только администраторы и владелец адреса'}`].filter(Boolean).join('; ')});
     if (settings.enabled && (credentialsChanged || !old.enabled) && process.env.NODE_ENV !== 'test') startSync(old.id);
     res.json((await listMailboxes()).find(item => item.id === old.id));
   }));
@@ -531,11 +579,12 @@ export function registerMail(app, db, {auth, admin, audit, requirePermission, se
     if (!row) throw new MailError(404, 'Письмо не найдено');
     return row;
   };
-  const canSend = req => req.user.role === 'admin' || req.user.permissions?.deal?.edit === true;
   app.get('/api/mail/summary', auth, route(async (req, res) => {
     const scope = visible(req);
     const unread = (await db.prepare(`SELECT COUNT(*) n FROM emails e WHERE e.read_at IS NULL AND e.direction='incoming' AND ${scope.sql}`).get(...scope.params)).n;
-    res.json({unread: Number(unread), can_send: canSend(req), mailboxes: (await db.prepare('SELECT id,email,name FROM mailboxes WHERE enabled=1 ORDER BY id').all()).map(row => ({id: row.id, email: row.email, name: row.name}))});
+    const senders = (await senderMailboxes(req)).map(row => ({id: row.id, email: row.email, name: row.name}));
+    // mailboxes: every connected one (the folder filter); send_mailboxes: the ones this employee may write from.
+    res.json({unread: Number(unread), can_send: senders.length > 0, send_mailboxes: senders, max_recipients: maxRecipients, mailboxes: (await db.prepare('SELECT id,email,name FROM mailboxes WHERE enabled=1 ORDER BY id').all()).map(row => ({id: row.id, email: row.email, name: row.name}))});
   }));
   app.get('/api/mail/emails', auth, route(async (req, res) => {
     const scope = visible(req), where = [scope.sql], params = [...scope.params];
@@ -569,20 +618,18 @@ export function registerMail(app, db, {auth, admin, audit, requirePermission, se
     res.json({updated: result.changes});
   }));
   app.post('/api/mail/emails/:id/reply', auth, route(async (req, res) => {
-    if (!canSend(req)) throw new MailError(403, 'Нет прав на это действие');
     const original = await visibleLetter(req, req.params.id), body = req.body || {};
-    const sent = await sendReply(db, box, {original, user: req.user, text: body.text, to: body.to, cc: body.cc, all: body.reply_all === true, withQuote: body.quote !== false});
+    const sent = await sendAs(req, original.mailbox_id, () => sendReply(db, box, {original, user: req.user, text: body.text, to: body.to, cc: body.cc, all: body.reply_all === true, withQuote: body.quote !== false, maxRecipients}));
     await audit(req, 'email.sent', {target: `email:${sent.id}`, details: `${original.deal_id ? `Сделка ${original.deal_id}; ` : ''}кому: ${emailRow(sent).to.map(item => item.address).join(', ')}`});
     res.status(201).json(emailView({...sent, mailbox_email: original.mailbox_email, author: req.user.name}));
   }));
   app.post('/api/mail/send', auth, route(async (req, res) => {
-    if (!canSend(req)) throw new MailError(403, 'Нет прав на это действие');
     const body = req.body || {}, dealId = body.deal_id == null || body.deal_id === '' ? null : Number(body.deal_id);
     if (dealId !== null) {
       const deal = await db.prepare('SELECT id,owner_id FROM deals WHERE id=? AND deleted_at IS NULL').get(dealId);
       if (!deal || req.user.role !== 'admin' && req.user.deal_access === 'own' && deal.owner_id !== req.user.id) throw new MailError(404, 'Сделка не найдена');
     }
-    const sent = await sendNew(db, box, {mailboxId: body.mailbox_id, user: req.user, to: body.to, cc: body.cc, subject: body.subject ?? '', text: body.text, dealId});
+    const sent = await sendAs(req, body.mailbox_id, () => sendNew(db, box, {mailboxId: body.mailbox_id, user: req.user, to: body.to, cc: body.cc, subject: body.subject ?? '', text: body.text, dealId, maxRecipients}));
     await audit(req, 'email.sent', {target: `email:${sent.id}`, details: `${sent.deal_id ? `Сделка ${sent.deal_id}; ` : ''}кому: ${emailRow(sent).to.map(item => item.address).join(', ')}`});
     res.status(201).json(emailView({...sent, author: req.user.name}));
   }));
@@ -626,7 +673,7 @@ export function registerMail(app, db, {auth, admin, audit, requirePermission, se
   app.get('/api/deals/:id/emails/:emailId', auth, route(async (req, res) => res.json(emailView(await dealLetter(req)))));
   app.post('/api/deals/:id/emails/:emailId/reply', auth, requirePermission('deal', 'edit'), route(async (req, res) => {
     const original = await dealLetter(req), body = req.body || {};
-    const sent = await sendReply(db, box, {original, user: req.user, text: body.text, to: body.to, cc: body.cc, all: body.reply_all === true, withQuote: body.quote !== false});
+    const sent = await sendAs(req, original.mailbox_id, () => sendReply(db, box, {original, user: req.user, text: body.text, to: body.to, cc: body.cc, all: body.reply_all === true, withQuote: body.quote !== false, maxRecipients}));
     await audit(req, 'email.sent', {target: `email:${sent.id}`, details: `Сделка ${original.deal_id}; кому: ${emailRow(sent).to.map(item => item.address).join(', ')}`});
     res.status(201).json(emailView({...sent, mailbox_email: original.mailbox_email, author: req.user.name}));
   }));

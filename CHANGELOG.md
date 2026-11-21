@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — mail, plugin and lead access
+
+- Sending mail needs access to the mailbox: administrators send from every mailbox, an employee from the mailbox with their own e-mail and from the mailboxes an administrator ticks for them in Settings → Mail («Кто отправляет»). Each mailbox row lists who sends from it; `user_ids` in the mailbox API.
+- One letter goes to at most `MAIL_MAX_RECIPIENTS` addresses (default 10, To and Cc together), and one employee sends at most `MAIL_SEND_PER_HOUR` letters an hour (default 50); refused letters are not counted.
+- Uploading or updating a plugin asks for the administrator's password, and the 2FA code when 2FA is on (`X-Confirm-Password`, `X-Confirm-Code`). Failed attempts count towards the sign-in limits and go to the security log (`auth.confirm_failed`).
+- An employee with «только свои» deal access sees in «Неразобранное» only the requests they added or handled, and cannot accept or reject other requests; new-request notifications follow the same rule.
+
 ## Unreleased — load and abuse limits
 
 - Sign-in limits use a 5-minute window: 10 failed attempts for one account from one address, 30 from one address over all accounts, 50 for one account from anywhere (not applied to a browser that signed in before). An IPv6 client counts as its /64, and a flood of new entries can no longer push out counters that are already at their limit.

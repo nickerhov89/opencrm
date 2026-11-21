@@ -52,7 +52,7 @@ export default function MailPage({api,auth,summary,openRequest,onOpenDeal,onSett
   const markUnread=async()=>{try{await api('/mail/emails/'+open.id+'/read',{method:'POST',body:{read:false}});setItems(current=>current.map(item=>item.id===open.id?{...item,read:false}:item));setOpen(null);onChanged()}catch(error){onError(error)}};
   const readAll=async()=>{try{await api('/mail/read-all',{method:'POST'});setItems(current=>current.map(item=>({...item,read:true})));onChanged();if(folder==='unread')void load(0)}catch(error){onError(error)}};
   const reply=async(id,body)=>{try{await api('/mail/emails/'+id+'/reply',{method:'POST',body});await openLetter(id);void load(0);return true}catch(error){onError(error);return false}};
-  const mailboxes=summary?.mailboxes||[],canSend=!!summary?.can_send&&mailboxes.length>0;
+  const mailboxes=summary?.mailboxes||[],senders=summary?.send_mailboxes||[],canSend=!!summary?.can_send&&senders.length>0;
   return <div className="mail-page">
     <header className="topbar mail-topbar">
       <button className="hamburger" onClick={onMenu}><Menu size={23}/></button>
@@ -66,7 +66,7 @@ export default function MailPage({api,auth,summary,openRequest,onOpenDeal,onSett
         {canSend&&<button className="blue-btn" onClick={()=>setCompose(true)}><Plus size={16}/> НАПИСАТЬ</button>}
       </div>
     </header>
-    {open?<Letter item={open} canSend={canSend} onReply={reply} onDeal={onOpenDeal} onOpen={openLetter} onUnread={markUnread} onBack={()=>setOpen(null)}/>:
+    {open?<Letter item={open} canSend={canSend&&senders.some(box=>box.id===open.mailbox_id)} onReply={reply} onDeal={onOpenDeal} onOpen={openLetter} onUnread={markUnread} onBack={()=>setOpen(null)}/>:
     <div className="mail-list">
       <div className="mail-row mail-head"><span>От кого</span><span>Сделка, тема и сообщение</span><span>Дата</span></div>
       {items.map(item=><div role="button" tabIndex={0} key={item.id} className={'mail-row'+(item.read?'':' unread')} onClick={()=>openLetter(item.id)} onKeyDown={event=>{if(event.key==='Enter')openLetter(item.id)}}>
@@ -78,6 +78,6 @@ export default function MailPage({api,auth,summary,openRequest,onOpenDeal,onSett
       {loading&&<div className="empty">Загружаем письма…</div>}
       {more&&!loading&&<button className="mail-more" onClick={()=>load(items.length)}>Показать ещё</button>}
     </div>}
-    {compose&&<ComposeEmail api={api} mailboxes={mailboxes} onClose={()=>setCompose(false)} onError={onError} onSent={async()=>{setCompose(false);onChanged();if(folder==='sent'||folder==='all')await load(0)}}/>}
+    {compose&&<ComposeEmail api={api} mailboxes={senders} onClose={()=>setCompose(false)} onError={onError} onSent={async()=>{setCompose(false);onChanged();if(folder==='sent'||folder==='all')await load(0)}}/>}
   </div>;
 }

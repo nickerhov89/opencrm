@@ -88,3 +88,6 @@ p.plugin-error{margin:0}
 .plugin-section-title{margin:0;padding:14px 22px 0;font-size:11px;letter-spacing:.3px;text-transform:uppercase;color:#8d979e}
 .plugin-details .plugin-endpoints,.plugin-details .plugin-settings,.plugin-details .plugin-logs{border-top:0}
 @media(max-width:760px){.plugin-grid{grid-template-columns:1fr}.plugin-tile{min-height:0}.plugin-head{flex-wrap:wrap}}
+
+/* Confirmation before installing plugin code */
+.plugin-confirm-text{margin:0;font-size:12px;line-height:1.55;color:#5d6973}

@@ -8,7 +8,7 @@ const placeholders={note:'Написать примечание…',chat:'Соо
 // «Письмо» sends a real letter when a mailbox is connected (mail.mailboxes) and the user may send;
 // «Записать без отправки» keeps the old manual record for letters written elsewhere.
 export default function DealComposer({note,setNote,onAddNote,onAddCommunication,onSendEmail,onSendChat,mail,recipients=[],colleagues=[],defaultColleague=null,onError}){
-  const mailboxes=mail?.can_send?mail.mailboxes||[]:[];
+  const mailboxes=mail?.can_send?mail.send_mailboxes||[]:[];
   const [mode,setMode]=useState('note'),[direction,setDirection]=useState('outgoing'),[subject,setSubject]=useState(''),[body,setBody]=useState(''),[busy,setBusy]=useState(false);
   const [chatTo,setChatTo]=useState(defaultColleague&&colleagues.some(user=>Number(user.id)===Number(defaultColleague))?[Number(defaultColleague)]:[]);
   const [mailboxId,setMailboxId]=useState(''),[to,setTo]=useState(recipients.join(', ')),[cc,setCc]=useState(''),[recordOnly,setRecordOnly]=useState(false);
