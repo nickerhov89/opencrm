@@ -7,6 +7,7 @@ import { createDb } from './db.js';
 import { parseCsv, quoteCsvCell } from './csv.js';
 import { registerIntegrations } from './integrations.js';
 import { registerMail, dealEmails, secretFilePath } from './mail.js';
+import { registerNotifications } from './notifications.js';
 import { createStageRules, RuleError } from './stage-rules.js';
 import { permissionEntities, permissionActions, normalizePermissions, noPermissions, defaultMemberPermissions, securityHeaders, createLoginLimiter, newTotpSecret, verifyTotp, otpauthUrl } from './security.js';
 import {defaultDealCardFields,validDealCardFields} from '../src/deal-card-layout.js';
@@ -978,6 +979,7 @@ function registerPurge(){
 }
 registerIntegrations(app,db,{auth,admin,audit,event,entityEvent,logEntityChanges,logDealChanges,runStageAutomation,customValueError,parseTags,taskSchedule,stageRules});
 registerMail(app,db,{auth,admin,audit,requirePermission,secretFile:secretFilePath(uploadDir)});
+registerNotifications(app,db,{auth});
 registerPurge();
 app.use(express.static(resolve(root,'dist')));
 app.get('/{*path}',(req,res) => { if (isApiPath(req.path)) return fail(res,404,'Маршрут не найден'); res.sendFile(resolve(root,'dist/index.html')); });
