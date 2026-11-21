@@ -358,6 +358,10 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
 -- Where a note came from: 'common' is written by a person; loads from amoCRM keep its note types (call_in, amomail_message, ...).
 ALTER TABLE notes ADD COLUMN IF NOT EXISTS note_type TEXT NOT NULL DEFAULT 'common';
 ALTER TABLE entity_notes ADD COLUMN IF NOT EXISTS note_type TEXT NOT NULL DEFAULT 'common';
+-- Mail section: when a letter was read (any employee); notifications: when the user last opened them.
+ALTER TABLE emails ADD COLUMN IF NOT EXISTS read_at TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_seen_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_emails_sent ON emails(sent_at);
 CREATE OR REPLACE FUNCTION normalize_telegram(value text) RETURNS text LANGUAGE sql IMMUTABLE AS $$
   SELECT lower(regexp_replace(btrim(COALESCE(value, '')), '^(https?://)?(www[.])?((t|telegram)[.]me/)?@?', ''))
 $$;

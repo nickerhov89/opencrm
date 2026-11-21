@@ -7,7 +7,7 @@ import http from 'node:http';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 
-test('production worker delivers a webhook without a manual queue call', {timeout: 20000}, async () => {
+test('production worker delivers a webhook without a manual queue call', {timeout: 40000}, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'opencrm-worker-'));
   const receiver = http.createServer();
   const portProbe = http.createServer();
@@ -38,7 +38,7 @@ test('production worker delivers a webhook without a manual queue call', {timeou
     return response.json();
   }
   try {
-    const deadline = Date.now() + 8000;
+    const deadline = Date.now() + 15000;   // startup under the load of the whole parallel test run
     while (true) {
       try { await request('/status'); break; }
       catch (error) { if (Date.now() > deadline || child.exitCode !== null) throw error; await new Promise(resolve => setTimeout(resolve, 50)); }

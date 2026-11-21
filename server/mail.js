@@ -217,9 +217,9 @@ async function bySubject(db, letter, own) {
   return deals.size === 1 ? {deal_id: [...deals][0], linked_by: 'subject'} : null;
 }
 
-async function storeLetter(db, letter, {mailboxId, userId = null, dealId, linkedBy}) {
-  const result = await db.prepare(`INSERT INTO emails (mailbox_id,deal_id,linked_by,direction,message_id,in_reply_to,references_json,from_address,from_name,reply_to,to_json,cc_json,subject,subject_key,body,attachments_json,sent_at,user_id,folder,uid)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (message_id) DO NOTHING`).run(mailboxId, dealId ?? null, dealId ? linkedBy : '', letter.direction, letter.message_id, letter.in_reply_to, JSON.stringify(letter.references), letter.from_address, letter.from_name, letter.reply_to, JSON.stringify(letter.to), JSON.stringify(letter.cc), letter.subject, subjectKey(letter.subject), letter.body, JSON.stringify(letter.attachments), letter.sent_at, userId, letter.folder || '', letter.uid ?? null);
+async function storeLetter(db, letter, {mailboxId, userId = null, dealId, linkedBy, read = false}) {
+  const result = await db.prepare(`INSERT INTO emails (mailbox_id,deal_id,linked_by,direction,message_id,in_reply_to,references_json,from_address,from_name,reply_to,to_json,cc_json,subject,subject_key,body,attachments_json,sent_at,user_id,folder,uid,read_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? THEN now_text() END) ON CONFLICT (message_id) DO NOTHING`).run(mailboxId, dealId ?? null, dealId ? linkedBy : '', letter.direction, letter.message_id, letter.in_reply_to, JSON.stringify(letter.references), letter.from_address, letter.from_name, letter.reply_to, JSON.stringify(letter.to), JSON.stringify(letter.cc), letter.subject, subjectKey(letter.subject), letter.body, JSON.stringify(letter.attachments), letter.sent_at, userId, letter.folder || '', letter.uid ?? null, read || letter.direction === 'outgoing' ? 1 : 0);
   return result.changes;
 }
 
@@ -287,7 +287,7 @@ export async function syncMailbox(db, box, id, {now = Date.now} = {}) {
               if (await db.prepare('SELECT 1 FROM emails WHERE message_id=?').get(letter.message_id)) continue;
               const found = await findDeal(db, letter, {own, known});
               letter.direction = await letterDirection(db, letter, found?.deal_id, own);
-              added += await storeLetter(db, letter, {mailboxId: mailbox.id, dealId: found?.deal_id, linkedBy: found?.linked_by});
+              added += await storeLetter(db, letter, {mailboxId: mailbox.id, dealId: found?.deal_id, linkedBy: found?.linked_by, read: !!message.flags?.has?.('\\Seen')});
             }
             folder.last = Math.max(folder.last, ...chunk);
             await db.prepare('UPDATE mailboxes SET sync_state=? WHERE id=?').run(JSON.stringify(state), mailbox.id);
@@ -331,6 +331,38 @@ function quote(letter) {
   return `${when}, ${letter.from_name ? `${letter.from_name} <${letter.from_address}>` : letter.from_address} пишет:\n${lines}`;
 }
 
+async function deliver(db, box, mailbox, {to, cc, subject, text, inReplyTo = '', references = []}) {
+  const messageId = `<${randomUUID()}@${mailbox.email.split('@')[1]}>`;
+  const transport = await mailHooks.smtpTransport(await smtpOptions(mailbox, box.open(mailbox.secret)));
+  try {
+    await transport.sendMail({from: {name: mailbox.name || '', address: mailbox.email}, to, cc: cc.length ? cc : undefined, subject, text, messageId, ...(inReplyTo ? {inReplyTo, references: references.join(' ')} : {})});
+  } catch (error) {
+    throw new MailError(502, `Письмо не отправлено: ${String(error?.response || error?.message || error).slice(0, 300)}`);
+  } finally { transport.close?.(); }
+  return {direction: 'outgoing', message_id: messageId, in_reply_to: inReplyTo, references, from_address: lower(mailbox.email), from_name: mailbox.name || '', reply_to: '', to: to.map(address => ({address, name: ''})), cc: cc.map(address => ({address, name: ''})), subject, body: text.slice(0, maxBody), attachments: [], sent_at: stamp(new Date()), folder: '', uid: null};
+}
+const recipientList = (list, name, required) => {
+  if (list === undefined || list === null) list = [];
+  if (!Array.isArray(list) || list.length > 50 || list.some(item => !validEmail(lower(item)))) bad(`${name}: список адресов e-mail`);
+  const unique = [...new Set(list.map(lower))];
+  if (required && !unique.length) bad('Укажите получателя');
+  return unique;
+};
+// A new letter (not a reply) from a connected mailbox; with dealId it goes to that deal, otherwise
+// the usual address rules find one.
+export async function sendNew(db, box, {mailboxId, user, to, cc, subject, text, dealId = null}) {
+  const mailbox = await db.prepare('SELECT * FROM mailboxes WHERE id=? AND enabled=1').get(Number(mailboxId) || 0);
+  if (!mailbox) bad('Выберите подключённый ящик');
+  const toList = recipientList(to, 'to', true), ccList = recipientList(cc, 'cc').filter(address => !toList.includes(address));
+  if (typeof subject !== 'string' || subject.length > 998) bad('Тема: до 998 символов');
+  if (typeof text !== 'string' || !text.trim() || text.length > 50000) bad('Напишите текст письма');
+  const sent = await deliver(db, box, mailbox, {to: toList, cc: ccList, subject: subject.trim(), text: text.trim()});
+  const own = await connectedAddresses(db);
+  const found = dealId ? {deal_id: dealId, linked_by: 'sent'} : await findDeal(db, sent, {own});
+  await storeLetter(db, sent, {mailboxId: mailbox.id, userId: user.id, dealId: found?.deal_id, linkedBy: found?.linked_by});
+  return await db.prepare('SELECT * FROM emails WHERE message_id=?').get(sent.message_id);
+}
+
 export async function sendReply(db, box, {original, user, text, to, cc, all = false, withQuote = true}) {
   const mailbox = original.mailbox_id && await db.prepare('SELECT * FROM mailboxes WHERE id=?').get(original.mailbox_id);
   if (!mailbox) throw new MailError(409, 'Ящик этого письма отключён от CRM — ответить из карточки нельзя');
@@ -343,17 +375,9 @@ export async function sendReply(db, box, {original, user, text, to, cc, all = fa
   if (typeof text !== 'string' || !text.trim() || text.length > 50000) bad('Напишите текст ответа');
   const body = withQuote && letter.body ? `${text.trim()}\n\n${quote(letter)}` : text.trim();
   const references = [...new Set([...letter.references, letter.message_id])].slice(-50);
-  const messageId = `<${randomUUID()}@${mailbox.email.split('@')[1]}>`;
-  const subject = reSubject(letter.subject || '');
-  const transport = await mailHooks.smtpTransport(await smtpOptions(mailbox, box.open(mailbox.secret)));
-  try {
-    await transport.sendMail({from: {name: mailbox.name || '', address: mailbox.email}, to: toList, cc: ccList.length ? ccList : undefined, subject, text: body, messageId, inReplyTo: letter.message_id, references: references.join(' ')});
-  } catch (error) {
-    throw new MailError(502, `Письмо не отправлено: ${String(error?.response || error?.message || error).slice(0, 300)}`);
-  } finally { transport.close?.(); }
-  const sent = {direction: 'outgoing', message_id: messageId, in_reply_to: letter.message_id, references, from_address: lower(mailbox.email), from_name: mailbox.name || '', reply_to: '', to: toList.map(address => ({address, name: ''})), cc: ccList.map(address => ({address, name: ''})), subject, body: body.slice(0, maxBody), attachments: [], sent_at: stamp(new Date()), folder: '', uid: null};
+  const sent = await deliver(db, box, mailbox, {to: toList, cc: ccList, subject: reSubject(letter.subject || ''), text: body, inReplyTo: letter.message_id, references});
   await storeLetter(db, sent, {mailboxId: mailbox.id, userId: user.id, dealId: original.deal_id, linkedBy: 'reply'});
-  return await db.prepare('SELECT * FROM emails WHERE message_id=?').get(messageId);
+  return await db.prepare('SELECT * FROM emails WHERE message_id=?').get(sent.message_id);
 }
 
 // ---------- views ----------
@@ -362,7 +386,7 @@ export function emailRow(row) {
 }
 export function emailView(row, {preview = false} = {}) {
   const item = emailRow(row), long = preview && item.body.length > previewBody;
-  return {id: item.id, mailbox_id: item.mailbox_id, mailbox: item.mailbox_email || null, deal_id: item.deal_id, linked_by: item.linked_by || null, direction: item.direction, message_id: item.message_id, in_reply_to: item.in_reply_to || null, references: item.references, from: {address: item.from_address, name: item.from_name}, reply_to: item.reply_to || null, to: item.to, cc: item.cc, subject: item.subject, text: long ? item.body.slice(0, previewBody) : item.body, text_truncated: long, attachments: item.attachments, sent_at: item.sent_at, user_id: item.user_id, author: item.author || null, created_at: item.created_at};
+  return {id: item.id, mailbox_id: item.mailbox_id, mailbox: item.mailbox_email || null, deal_id: item.deal_id, linked_by: item.linked_by || null, direction: item.direction, message_id: item.message_id, in_reply_to: item.in_reply_to || null, references: item.references, from: {address: item.from_address, name: item.from_name}, reply_to: item.reply_to || null, to: item.to, cc: item.cc, subject: item.subject, text: long ? item.body.slice(0, previewBody) : item.body, text_truncated: long, attachments: item.attachments, sent_at: item.sent_at, user_id: item.user_id, author: item.author || null, read: !!item.read_at, ...(item.deal_name !== undefined ? {deal_name: item.deal_name} : {}), created_at: item.created_at};
 }
 export const emailSelect = 'SELECT e.*,m.email mailbox_email,u.name author FROM emails e LEFT JOIN mailboxes m ON m.id=e.mailbox_id LEFT JOIN users u ON u.id=e.user_id';
 export async function dealEmails(db, dealId) {
@@ -487,6 +511,71 @@ export function registerMail(app, db, {auth, admin, audit, requirePermission, se
     await db.prepare('UPDATE emails SET deal_id=?,linked_by=?,direction=? WHERE id=?').run(dealId, dealId ? 'manual' : '', await letterDirection(db, email, dealId, await connectedAddresses(db)), email.id);
     await audit(req, 'email.linked', {target: `email:${email.id}`, details: dealId ? `К сделке ${dealId}` : 'Отвязано от сделки'});
     res.json({ok: true});
+  }));
+
+  // ---------- the «Почта» section ----------
+  // Admins see every letter; employees see the letters of deals they can open.
+  const visible = req => req.user.role === 'admin' ? {sql: '1=1', params: []} : {sql: 'e.deal_id IN (SELECT d.id FROM deals d WHERE d.deleted_at IS NULL AND (?=0 OR d.owner_id=?))', params: [req.user.deal_access === 'own' ? 1 : 0, req.user.id]};
+  const listSelect = 'SELECT e.*,m.email mailbox_email,u.name author,d.name deal_name FROM emails e LEFT JOIN mailboxes m ON m.id=e.mailbox_id LEFT JOIN users u ON u.id=e.user_id LEFT JOIN deals d ON d.id=e.deal_id';
+  const visibleLetter = async (req, id) => {
+    const scope = visible(req), row = await db.prepare(`${listSelect} WHERE e.id=? AND ${scope.sql}`).get(Number(id) || 0, ...scope.params);
+    if (!row) throw new MailError(404, 'Письмо не найдено');
+    return row;
+  };
+  const canSend = req => req.user.role === 'admin' || req.user.permissions?.deal?.edit === true;
+  app.get('/api/mail/summary', auth, route(async (req, res) => {
+    const scope = visible(req);
+    const unread = (await db.prepare(`SELECT COUNT(*) n FROM emails e WHERE e.read_at IS NULL AND e.direction='incoming' AND ${scope.sql}`).get(...scope.params)).n;
+    res.json({unread: Number(unread), can_send: canSend(req), mailboxes: (await db.prepare('SELECT id,email,name FROM mailboxes WHERE enabled=1 ORDER BY id').all()).map(row => ({id: row.id, email: row.email, name: row.name}))});
+  }));
+  app.get('/api/mail/emails', auth, route(async (req, res) => {
+    const scope = visible(req), where = [scope.sql], params = [...scope.params];
+    const folder = String(req.query.folder || 'inbox');
+    if (folder === 'inbox') where.push("e.direction='incoming'");
+    else if (folder === 'sent') where.push("e.direction='outgoing'");
+    else if (folder === 'unlinked') where.push('e.deal_id IS NULL');
+    else if (folder === 'unread') where.push("e.read_at IS NULL AND e.direction='incoming'");
+    else if (folder !== 'all') bad('Папка: inbox, sent, unread, unlinked или all');
+    if (req.query.mailbox_id) { where.push('e.mailbox_id=?'); params.push(Number(req.query.mailbox_id) || 0); }
+    const q = clean(String(req.query.q || ''), 200).toLowerCase();
+    if (q) { where.push("(lower(e.subject) LIKE ? OR lower(e.from_address) LIKE ? OR lower(e.from_name) LIKE ? OR lower(e.to_json) LIKE ? OR lower(e.body) LIKE ?)"); const like = `%${q.replace(/[\\%_]/g, char => '\\' + char)}%`; params.push(like, like, like, like, like); }
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200), offset = Math.min(Math.max(Number(req.query.offset) || 0, 0), 100000);
+    const rows = await db.prepare(`${listSelect} WHERE ${where.join(' AND ')} ORDER BY e.sent_at DESC,e.id DESC LIMIT ? OFFSET ?`).all(...params, limit + 1, offset);
+    res.json({items: rows.slice(0, limit).map(row => { const view = emailView(row, {preview: true}); view.text = view.text.slice(0, 300); return view; }), more: rows.length > limit});
+  }));
+  app.get('/api/mail/emails/:id', auth, route(async (req, res) => {
+    const row = await visibleLetter(req, req.params.id), scope = visible(req);
+    if (!row.read_at) await db.prepare('UPDATE emails SET read_at=now_text() WHERE id=? AND read_at IS NULL').run(row.id);
+    const thread = await db.prepare(`${listSelect} WHERE ${scope.sql} AND e.id<>? AND (e.message_id IN (SELECT jsonb_array_elements_text(references_json::jsonb) FROM emails WHERE id=? UNION SELECT in_reply_to FROM emails WHERE id=?) OR e.in_reply_to=? OR jsonb_exists(e.references_json::jsonb, ?)) ORDER BY e.sent_at,e.id LIMIT 100`).all(...scope.params, row.id, row.id, row.id, row.message_id, row.message_id);
+    res.json({...emailView({...row, read_at: row.read_at || 'now'}), thread: thread.map(item => emailView(item, {preview: true}))});
+  }));
+  app.post('/api/mail/emails/:id/read', auth, route(async (req, res) => {
+    const row = await visibleLetter(req, req.params.id);
+    await db.prepare(`UPDATE emails SET read_at=${req.body?.read === false ? 'NULL' : 'COALESCE(read_at,now_text())'} WHERE id=?`).run(row.id);
+    res.json({ok: true});
+  }));
+  app.post('/api/mail/read-all', auth, route(async (req, res) => {
+    const scope = visible(req);
+    const result = await db.prepare(`UPDATE emails SET read_at=now_text() WHERE id IN (SELECT e.id FROM emails e WHERE e.read_at IS NULL AND ${scope.sql})`).run(...scope.params);
+    res.json({updated: result.changes});
+  }));
+  app.post('/api/mail/emails/:id/reply', auth, route(async (req, res) => {
+    if (!canSend(req)) throw new MailError(403, 'Нет прав на это действие');
+    const original = await visibleLetter(req, req.params.id), body = req.body || {};
+    const sent = await sendReply(db, box, {original, user: req.user, text: body.text, to: body.to, cc: body.cc, all: body.reply_all === true, withQuote: body.quote !== false});
+    await audit(req, 'email.sent', {target: `email:${sent.id}`, details: `${original.deal_id ? `Сделка ${original.deal_id}; ` : ''}кому: ${emailRow(sent).to.map(item => item.address).join(', ')}`});
+    res.status(201).json(emailView({...sent, mailbox_email: original.mailbox_email, author: req.user.name}));
+  }));
+  app.post('/api/mail/send', auth, route(async (req, res) => {
+    if (!canSend(req)) throw new MailError(403, 'Нет прав на это действие');
+    const body = req.body || {}, dealId = body.deal_id == null || body.deal_id === '' ? null : Number(body.deal_id);
+    if (dealId !== null) {
+      const deal = await db.prepare('SELECT id,owner_id FROM deals WHERE id=? AND deleted_at IS NULL').get(dealId);
+      if (!deal || req.user.role !== 'admin' && req.user.deal_access === 'own' && deal.owner_id !== req.user.id) throw new MailError(404, 'Сделка не найдена');
+    }
+    const sent = await sendNew(db, box, {mailboxId: body.mailbox_id, user: req.user, to: body.to, cc: body.cc, subject: body.subject ?? '', text: body.text, dealId});
+    await audit(req, 'email.sent', {target: `email:${sent.id}`, details: `${sent.deal_id ? `Сделка ${sent.deal_id}; ` : ''}кому: ${emailRow(sent).to.map(item => item.address).join(', ')}`});
+    res.status(201).json(emailView({...sent, author: req.user.name}));
   }));
 
   // Deal routes: the /api/deals/:id middleware has already checked the deal and the user's access to it.

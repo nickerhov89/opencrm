@@ -1,6 +1,6 @@
 import {appBase, appPath} from './app-base.js';
 
-const sectionPaths={dashboard:'/dashboard',deals:'/deals',tasks:'/tasks',contacts:'/contacts',companies:'/companies',all:'/lists/all',files:'/files',analytics:'/analytics',settings:'/settings',inbox:'/inbox','pipeline-settings':'/pipelines/settings'};
+const sectionPaths={dashboard:'/dashboard',deals:'/deals',tasks:'/tasks',contacts:'/contacts',companies:'/companies',all:'/lists/all',files:'/files',analytics:'/analytics',settings:'/settings',mail:'/mail',inbox:'/inbox','pipeline-settings':'/pipelines/settings'};
 
 export const pathForView=view=>appPath(sectionPaths[view]||'/deals');
 export const pathForDeal=id=>appPath(`/deals/${Number(id)}`);

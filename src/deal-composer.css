@@ -16,3 +16,8 @@
 .deal-communication strong{display:block;font-size:11px;color:#55738c;margin-top:3px}
 .deal-communication p{overflow-wrap:anywhere}
 @media(max-width:650px){.deal-compose-entry{align-items:stretch}.deal-compose-entry .blue-btn{align-self:end}.deal-compose-meta{flex-wrap:wrap}.deal-compose-meta .deal-compose-subject{flex-basis:100%}}
+.deal-compose-mail{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 9px}
+.deal-compose-mail label{display:flex;flex-direction:column;gap:3px;color:#7e8c97;font-size:10px;min-width:0}
+.deal-compose-mail select,.deal-compose-mail input{height:30px;border:1px solid #d5dadd;border-radius:2px;background:#fff;color:#35424e;padding:4px 7px;font-size:11px;min-width:0}
+.deal-compose-record{display:flex;align-items:center;gap:6px;font-size:10px;color:#8a96a0}
+@media(max-width:650px){.deal-compose-mail{grid-template-columns:1fr}}
