@@ -11,8 +11,8 @@ import './settings.css';
 const entityNames={deal:'Сделки',contact:'Контакты',company:'Компании'};
 const fieldNames={text:'Текст',number:'Число',date:'Дата',url:'Ссылка',select:'Список'};
 
-export default function SettingsPage({auth,users,groups,pipelines,pipeline,stages,customFields,api,onError,onAccountChange,onRefresh,onMenu,onAddCustomField,onEditCustomField,onAddUser,onEditUser,onAddPipeline,onEditPipeline,onAddStage,onEditStage,onLogout,onAuthChange}) {
-  const [section,setSection]=useState('general');
+export default function SettingsPage({initialSection,auth,users,groups,pipelines,pipeline,stages,customFields,api,onError,onAccountChange,onRefresh,onMenu,onAddCustomField,onEditCustomField,onAddUser,onEditUser,onAddPipeline,onEditPipeline,onAddStage,onEditStage,onLogout,onAuthChange}) {
+  const [section,setSection]=useState(initialSection||'general');
   const [account,setAccount]=useState('OpenCRM');
   const [draft,setDraft]=useState('OpenCRM');
   const [saving,setSaving]=useState(false);

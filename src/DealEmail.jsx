@@ -19,7 +19,7 @@ export function replyDefaults(item,all){
   return {to:toList,cc:unique(cc).filter(address=>address!==self&&!toList.includes(address))};
 }
 
-function ReplyForm({item,all,onSend,onCancel}){
+export function ReplyForm({item,all,onSend,onCancel}){
   const defaults=replyDefaults(item,all);
   const [to,setTo]=useState(defaults.to.join(', ')),[cc,setCc]=useState(defaults.cc.join(', ')),[text,setText]=useState(''),[quote,setQuote]=useState(true),[busy,setBusy]=useState(false);
   const submit=async event=>{event.preventDefault();if(busy||!text.trim())return;setBusy(true);try{const ok=await onSend({text,to:splitList(to),cc:splitList(cc),reply_all:all,quote});if(ok)onCancel()}finally{setBusy(false)}};
