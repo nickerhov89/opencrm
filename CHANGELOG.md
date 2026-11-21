@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — closer to amoCRM
+
+- «Почта» in the left menu with an unread badge: folders (inbox, unread, sent, without a deal, all), mailbox choice, search, the letter with its thread, «Ответить», «Ответить всем», «Непрочитанное», «Прочитать все». Employees see letters of the deals they can open, admins see all.
+- «Написать» sends a new letter from a connected mailbox; in the deal card «Письмо» now sends for real (recipients from the deal contacts) and the letter lands in the feed. «Записать без отправки» keeps the manual record. API: `GET /api/mail/summary`, `GET /api/mail/emails`, `GET /api/mail/emails/:id`, `POST /api/mail/send`, `POST /api/mail/emails/:id/reply`, read marks.
+- «Сообщения» at the bottom of the menu: overdue tasks and tasks due within the hour, unread letters of my deals, new requests in «Неразобранное», with a badge for what appeared since the panel was last opened.
+- Board: every open deal of the pipeline is loaded (before, only the 1000 most recently changed deals, so open deals could be missing); the header counts open deals; won and lost stages are drop zones at the bottom while a card is dragged; an empty imported «Неразобранное» stage is hidden next to the requests column; the card shows the «Источник» custom field when the built-in source is empty and hides a zero budget.
+- Deal feed: HTML entities in notes moved from amoCRM are shown decoded, long notes fold with «Показать полностью», three or more system events in a row fold into one line.
+
 ## Unreleased — mail in deals
 
 - Connected mailboxes (Settings → Mail, admins): IMAP/SMTP with an app password, or Google Workspace through a service account with domain-wide delegation (XOAUTH2). The connection is checked before saving; passwords and keys are encrypted with `OPENCRM_SECRET_KEY` or a key file outside the backups.
