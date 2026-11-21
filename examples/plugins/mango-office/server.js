@@ -36,6 +36,12 @@ async function employeeMap(ctx) {
   return map;
 }
 
+// A phone field can hold several numbers («+7 900 111-22-33, 8 912 000-11-22», moved from amoCRM).
+// Keep the separators and drop everything else, then look for the last 10 digits inside: every
+// number of the list matches, and an extension after the number («… доб. 12») does not get in the way.
+const phoneDigits = column => `regexp_replace(regexp_replace(${column},'[,;/\n]+',',','g'),'[^0-9,]','','g')`;
+const phoneLike = number => `%${phoneKey(number)}%`;
+
 const canSeeAll = user => user.role === 'admin' || user.deal_access !== 'own';
 
 export async function activate(ctx) {
@@ -52,9 +58,9 @@ export async function activate(ctx) {
   async function findClient(number) {
     const key = phoneKey(number);
     if (key.length < 7) return {};
-    const like = `%${key}`;
-    const contact = await db.prepare("SELECT id,company_id FROM contacts WHERE deleted_at IS NULL AND regexp_replace(phone,'[^0-9]','','g') LIKE ? ORDER BY updated_at DESC LIMIT 1").get(like);
-    const company = contact?.company_id ? {id: contact.company_id} : await db.prepare("SELECT id FROM companies WHERE deleted_at IS NULL AND regexp_replace(phone,'[^0-9]','','g') LIKE ? ORDER BY updated_at DESC LIMIT 1").get(like);
+    const like = phoneLike(number);
+    const contact = await db.prepare(`SELECT id,company_id FROM contacts WHERE deleted_at IS NULL AND ${phoneDigits('phone')} LIKE ? ORDER BY updated_at DESC LIMIT 1`).get(like);
+    const company = contact?.company_id ? {id: contact.company_id} : await db.prepare(`SELECT id FROM companies WHERE deleted_at IS NULL AND ${phoneDigits('phone')} LIKE ? ORDER BY updated_at DESC LIMIT 1`).get(like);
     const open = "SELECT d.id FROM deals d JOIN stages s ON s.id=d.stage_id WHERE d.deleted_at IS NULL AND s.kind='active' AND ";
     let deal = contact && await db.prepare(`${open}(d.contact_id=? OR d.id IN (SELECT deal_id FROM deal_contacts WHERE contact_id=?)) ORDER BY d.updated_at DESC LIMIT 1`).get(contact.id, contact.id);
     if (!deal && company) deal = await db.prepare(`${open}d.company_id=? ORDER BY d.updated_at DESC LIMIT 1`).get(company.id);
@@ -65,7 +71,7 @@ export async function activate(ctx) {
     const direction = Number(event.call_direction);
     if (direction !== 1 && direction !== 2) return;                      // 0 = internal call
     const entry = String(event.entry_id || '');
-    if (!entry || await db.prepare('SELECT 1 FROM plugin_mango_calls WHERE entry_id=?').get(entry)) return;
+    if (!entry) return;
     const incoming = direction === 1;
     const number = digits(incoming ? event.from?.number : event.to?.number);
     const extension = String((incoming ? event.to?.extension : event.from?.extension) ?? '');
@@ -74,43 +80,56 @@ export async function activate(ctx) {
     const seconds = answered && talk && end > talk ? end - talk : 0;
     const started = moment(event.create_time);
     const employee = (await employeeMap(ctx)).get(extension);
-    const client = await findClient(number);
-
-    const subject = incoming ? (answered ? 'Входящий звонок' : 'Пропущенный входящий звонок') : (answered ? 'Исходящий звонок' : 'Исходящий звонок — не дозвонились');
-    const parts = [`${incoming ? 'от' : 'на'} ${prettyPhone(number)}`];
-    if (seconds) parts.push(`разговор ${callLength(seconds)}`);
-    if (employee) parts.push(`${incoming ? 'ответил' : 'звонил'} ${employee.name}`);
-    else if (extension) parts.push(`внутр. ${extension}`);
-    if (event.line_number) parts.push(`линия ${prettyPhone(event.line_number)}`);
-    const body = parts.join(', ');
-
-    let leadId = null;
-    if (client.deal) {
-      // The feed already titles it «Входящий/Исходящий звонок»; the subject adds the outcome or the length.
-      const outcome = seconds ? callLength(seconds) : answered ? '' : incoming ? 'пропущен' : 'не дозвонились';
-      await ctx.crm.addCommunication(client.deal.id, {kind: 'call', direction: incoming ? 'incoming' : 'outgoing', subject: outcome, body, user_id: employee?.id, created_at: started});
-    } else if (client.contact) {
-      await ctx.crm.addEntityEvent('contact', client.contact.id, `${subject} ${body}`);
-    } else if (client.company) {
-      await ctx.crm.addEntityEvent('company', client.company.id, `${subject} ${body}`);
-    } else if (incoming && ctx.settings.create_leads !== false && number) {
-      // One request per unknown number: a repeat call goes to the request that is still waiting.
-      const waiting = await db.prepare("SELECT id FROM inbox_leads WHERE status='pending' AND regexp_replace(phone,'[^0-9]','','g') LIKE ? ORDER BY id DESC LIMIT 1").get(`%${phoneKey(number)}`);
-      leadId = waiting?.id || (await ctx.crm.createLead({
-        pipeline_id: ctx.settings.pipeline_id || undefined,
-        title: `Звонок ${prettyPhone(number)}`,
-        phone: prettyPhone(number),
-        source: 'Mango Office',
-        message: `${subject} ${body}. Запись разговора — в разделе «Звонки».`,
-      })).id;
+    // Claim the call first: of two deliveries of the same event only one gets the row and writes the feed.
+    const claimed = await db.prepare(`INSERT INTO plugin_mango_calls (entry_id,direction,number,extension,line_number,user_id,answered,duration,started_at)
+      VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT (entry_id) DO NOTHING`).run(
+      entry, incoming ? 'incoming' : 'outgoing', number, extension, digits(event.line_number), employee?.id ?? null, answered ? 1 : 0, seconds, sqlTime(started));
+    if (!claimed.changes) return;
+    try { await record(); }
+    catch (error) {
+      // Let Mango's retry process the call again.
+      await db.prepare('DELETE FROM plugin_mango_calls WHERE entry_id=?').run(entry);
+      throw error;
     }
-    const pending = await ctx.storage.get(`record:${entry}`);
-    await db.prepare(`INSERT INTO plugin_mango_calls (entry_id,direction,number,extension,line_number,user_id,answered,duration,started_at,deal_id,contact_id,company_id,lead_id,recording_id)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (entry_id) DO NOTHING`).run(
-      entry, incoming ? 'incoming' : 'outgoing', number, extension, digits(event.line_number), employee?.id ?? null, answered ? 1 : 0, seconds, sqlTime(started),
-      client.deal?.id ?? null, client.contact?.id ?? null, client.company?.id ?? null, leadId, pending || '');
-    if (pending) await ctx.storage.delete(`record:${entry}`);
-    ctx.log.info(`${subject} ${body}${client.deal ? ` → сделка #${client.deal.id}` : leadId ? ` → заявка #${leadId}` : ''}`);
+
+    async function record() {
+      const client = await findClient(number);
+
+      const subject = incoming ? (answered ? 'Входящий звонок' : 'Пропущенный входящий звонок') : (answered ? 'Исходящий звонок' : 'Исходящий звонок — не дозвонились');
+      const parts = [`${incoming ? 'от' : 'на'} ${prettyPhone(number)}`];
+      if (seconds) parts.push(`разговор ${callLength(seconds)}`);
+      if (employee) parts.push(`${incoming ? 'ответил' : 'звонил'} ${employee.name}`);
+      else if (extension) parts.push(`внутр. ${extension}`);
+      if (event.line_number) parts.push(`линия ${prettyPhone(event.line_number)}`);
+      const body = parts.join(', ');
+
+      let leadId = null;
+      if (client.deal) {
+        // The feed already titles it «Входящий/Исходящий звонок»; the subject adds the outcome or the length.
+        const outcome = seconds ? callLength(seconds) : answered ? '' : incoming ? 'пропущен' : 'не дозвонились';
+        await ctx.crm.addCommunication(client.deal.id, {kind: 'call', direction: incoming ? 'incoming' : 'outgoing', subject: outcome, body, user_id: employee?.id, created_at: started});
+      } else if (client.contact) {
+        await ctx.crm.addEntityEvent('contact', client.contact.id, `${subject} ${body}`);
+      } else if (client.company) {
+        await ctx.crm.addEntityEvent('company', client.company.id, `${subject} ${body}`);
+      } else if (incoming && ctx.settings.create_leads !== false && number) {
+        // One request per unknown number: a repeat call goes to the request that is still waiting.
+        const waiting = await db.prepare(`SELECT id FROM inbox_leads WHERE status='pending' AND ${phoneDigits('phone')} LIKE ? ORDER BY id DESC LIMIT 1`).get(phoneLike(number));
+        leadId = waiting?.id || (await ctx.crm.createLead({
+          pipeline_id: ctx.settings.pipeline_id || undefined,
+          title: `Звонок ${prettyPhone(number)}`,
+          phone: prettyPhone(number),
+          source: 'Mango Office',
+          message: `${subject} ${body}. Запись разговора — в разделе «Звонки».`,
+        })).id;
+      }
+      const pending = await ctx.storage.get(`record:${entry}`);
+      // A recording that arrived while the call was processed is already in the row; keep it.
+      await db.prepare("UPDATE plugin_mango_calls SET deal_id=?,contact_id=?,company_id=?,lead_id=?,recording_id=CASE WHEN ?<>'' THEN ? ELSE recording_id END WHERE entry_id=?").run(
+        client.deal?.id ?? null, client.contact?.id ?? null, client.company?.id ?? null, leadId, pending || '', pending || '', entry);
+      if (pending) await ctx.storage.delete(`record:${entry}`);
+      ctx.log.info(`${subject} ${body}${client.deal ? ` → сделка #${client.deal.id}` : leadId ? ` → заявка #${leadId}` : ''}`);
+    }
   }
 
   async function recordAdded(event) {

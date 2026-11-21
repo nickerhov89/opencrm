@@ -49,9 +49,9 @@ test('Mango Office: звонки в ленту сделки, «Неразобр�
   await new Promise(resolve => server.once('listening', resolve));
   const base = `http://127.0.0.1:${server.address().port}/api`;
   let cookie = '';
-  async function request(path, method = 'GET', body, status = 200, headers = {}) {
+  async function request(path, method = 'GET', body, status = 200, headers = {}, {anonymous = false} = {}) {
     const raw = Buffer.isBuffer(body) || typeof body === 'string';
-    const response = await fetch(base + path, {method, headers: {...(raw ? {} : {'Content-Type': 'application/json'}), ...(cookie ? {Cookie: cookie} : {}), ...headers}, body: body === undefined ? undefined : raw ? body : JSON.stringify(body)});
+    const response = await fetch(base + path, {method, headers: {...(raw ? {} : {'Content-Type': 'application/json'}), ...(cookie && !anonymous ? {Cookie: cookie} : {}), ...headers}, body: body === undefined ? undefined : raw ? body : JSON.stringify(body)});
     const type = response.headers.get('content-type') || '';
     const data = type.includes('json') ? await response.json() : type.startsWith('audio/') ? Buffer.from(await response.arrayBuffer()) : await response.text();
     assert.equal(response.status, status, `${method} ${path}: ${JSON.stringify(data)}`);
@@ -62,10 +62,7 @@ test('Mango Office: звонки в ленту сделки, «Неразобр�
   const send = async (name, event, {status = 200, sign} = {}) => {
     const json = JSON.stringify(event);
     const form = new URLSearchParams({vpbx_api_key: key, sign: sign || sha256(key + json + salt), json}).toString();
-    const saved = cookie;
-    cookie = '';
-    try { return await request(`/plugins/mango-office/public/mango/${name}`, 'POST', form, status, {'Content-Type': 'application/x-www-form-urlencoded'}); }
-    finally { cookie = saved; }
+    return request(`/plugins/mango-office/public/mango/${name}`, 'POST', form, status, {'Content-Type': 'application/x-www-form-urlencoded'}, {anonymous: true});
   };
   const t0 = Math.floor(Date.parse('2026-11-20T10:00:00Z') / 1000);
   const summary = (entry, direction, number, extension, {answered = true, talk = 0, line = '74950000000'} = {}) => ({
@@ -92,7 +89,8 @@ test('Mango Office: звонки в ленту сделки, «Неразобр�
     const deal = await request('/deals', 'POST', {name: 'Сделка Ирины', stage_id: stages[0].id, contact_id: contact.id}, 201);
 
     // A known number with an open deal: the call goes to the deal feed from the employee.
-    await send('events/summary', summary('e1', 1, '79001112233', 101, {talk: 135}));
+    // Mango may deliver the same event twice, even at the same time.
+    await Promise.all([send('events/summary', summary('e1', 1, '79001112233', 101, {talk: 135})), send('events/summary', summary('e1', 1, '79001112233', 101, {talk: 135}))]);
     await send('events/summary', summary('e1', 1, '79001112233', 101, {talk: 135}));
     let calls = await db.prepare('SELECT * FROM deal_communications WHERE deal_id=?').all(deal.id);
     assert.equal(calls.length, 1, 'повтор события не дублирует звонок');
@@ -120,6 +118,16 @@ test('Mango Office: звонки в ленту сделки, «Неразобр�
     assert.ok(history.some(item => /^Mango Office: Исходящий звонок на \+7 912 000-11-22, разговор 0:30, звонил Админ/.test(item.event)), JSON.stringify(history));
     assert.equal((await db.prepare("SELECT COUNT(*) n FROM plugin_mango_calls WHERE entry_id='e5'").get()).n, 0);
 
+    // Several numbers in one field (moved from amoCRM): a call from any of them finds the contact.
+    const several = await request('/contacts', 'POST', {name: 'Ольга', phone: '+7 (901) 222-33-44, 8 (913) 555-66-77 доб. 12'}, 201);
+    await send('events/summary', summary('e7', 1, '79135556677', 101, {talk: 20}));
+    await send('events/summary', summary('e8', 1, '79012223344', 101, {talk: 20}));
+    assert.equal((await db.prepare("SELECT COUNT(*) n FROM entity_activity WHERE entity_type='contact' AND entity_id=?").get(several.id)).n >= 2, true);
+    assert.deepEqual((await db.prepare("SELECT contact_id FROM plugin_mango_calls WHERE entry_id IN ('e7','e8')").all()).map(row => Number(row.contact_id)), [several.id, several.id]);
+    // Digits across the comma do not glue into a third number.
+    await send('events/summary', summary('e9', 2, '73344891355', 101, {answered: false}));
+    assert.equal((await db.prepare("SELECT contact_id FROM plugin_mango_calls WHERE entry_id='e9'").get()).contact_id, null);
+
     // Recordings: one arrives after the call summary, another before it.
     await send('events/record/added', {entry_id: 'e1', recording_id: 'rec-1', product_id: 1, user_id: 1, timestamp: t0 + 200});
     await send('events/record/added', {entry_id: 'e6', recording_id: 'rec-6', product_id: 1, user_id: 1, timestamp: t0 + 200});
@@ -132,7 +140,7 @@ test('Mango Office: звонки в ленту сделки, «Неразобр�
     assert.equal(calls[0].number, '+7 900 111-22-33');
     assert.equal(calls[0].duration, '2:15');
     const journal = await request('/plugins/mango-office/calls');
-    assert.equal(journal.length, 5);
+    assert.equal(journal.length, 8);
     assert.deepEqual((await request('/plugins/mango-office/calls?filter=missed')).map(call => call.entry_id).sort(), ['e2', 'e3']);
     assert.ok((await request('/plugins/mango-office/calls?filter=missed')).every(call => call.lead_id === leads[0].id));
 
