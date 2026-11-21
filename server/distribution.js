@@ -28,13 +28,21 @@ function endOfDay(createdAt) {
 
 export function ruleView(row, users = []) {
   const ids = json(row.user_ids_json, []);
-  return {id: row.id, name: row.name, pipeline_id: row.pipeline_id, origins: json(row.origins_json, []), sources: json(row.sources_json, []), user_ids: ids, users: ids.map(id => users.find(user => Number(user.id) === Number(id))?.name || `#${id}`), task_title: row.task_title, task_type: row.task_type, active: !!row.active, sort_order: Number(row.sort_order), next_index: Number(row.next_index), assigned: Number(row.assigned || 0), created_at: row.created_at};
+  return {id: row.id, name: row.name, pipeline_id: row.pipeline_id, origins: json(row.origins_json, []), sources: json(row.sources_json, []), conditions: json(row.conditions_json, []), user_ids: ids, users: ids.map(id => users.find(user => Number(user.id) === Number(id))?.name || `#${id}`), task_title: row.task_title, task_type: row.task_type, active: !!row.active, sort_order: Number(row.sort_order), next_index: Number(row.next_index), assigned: Number(row.assigned || 0), created_at: row.created_at};
 }
 
+// Conditions on other deal custom fields: [{field_id, values: [...]}]; every condition must hold,
+// the value compared without case and surrounding spaces. An empty list of values means «field is empty».
+const conditionsHold = (rule, values) => json(rule.conditions_json, []).every(condition => {
+  const wanted = (condition.values || []).map(lower), actual = lower(values.get(Number(condition.field_id)));
+  return wanted.length ? wanted.includes(actual) : !actual;
+});
 async function matchRule(db, deal) {
   const rules = (await db.prepare('SELECT * FROM deal_distribution_rules WHERE active=1 ORDER BY sort_order,id').all()).filter(rule => json(rule.origins_json, []).includes(deal.origin));
+  const values = new Map((await db.prepare("SELECT field_id,value FROM custom_field_values WHERE entity_id=? AND field_id IN (SELECT id FROM custom_fields WHERE entity_type='deal')").all(deal.id)).map(row => [Number(row.field_id), row.value]));
   return rules.find(rule => (rule.pipeline_id == null || Number(rule.pipeline_id) === Number(deal.pipeline_id))
-    && (() => { const sources = json(rule.sources_json, []).map(lower).filter(Boolean); return !sources.length || sources.includes(lower(deal.source)); })()) || null;
+    && (() => { const sources = json(rule.sources_json, []).map(lower).filter(Boolean); return !sources.length || sources.includes(lower(deal.source)); })()
+    && conditionsHold(rule, values)) || null;
 }
 
 // One queued deal. Returns the manager's id, or null when no rule applies.
@@ -83,6 +91,9 @@ export function registerDistribution(app, db, {auth, admin, audit}) {
     if (pipeline !== null && !(await db.prepare('SELECT 1 FROM pipelines WHERE id=?').get(pipeline))) throw Object.assign(new Error('Воронка не найдена'), {status: 400});
     const sources = body.sources === undefined ? json(old.sources_json, []) : body.sources;
     if (!Array.isArray(sources) || sources.length > 100 || sources.some(item => typeof item !== 'string' || item.length > 200)) throw Object.assign(new Error('Источники: список строк'), {status: 400});
+    const conditions = body.conditions === undefined ? json(old.conditions_json, []) : body.conditions;
+    if (!Array.isArray(conditions) || conditions.length > 10 || conditions.some(item => !item || !Number.isInteger(Number(item.field_id)) || !Array.isArray(item.values) || item.values.length > 100 || item.values.some(value => typeof value !== 'string' || value.length > 500))) throw Object.assign(new Error('Условия: [{field_id, values: [строки]}]'), {status: 400});
+    for (const item of conditions) if (!(await db.prepare("SELECT 1 FROM custom_fields WHERE id=? AND entity_type='deal'").get(Number(item.field_id)))) throw Object.assign(new Error('Поле сделки не найдено'), {status: 400});
     const from = body.origins === undefined ? json(old.origins_json, ['api']) : body.origins;
     if (!Array.isArray(from) || !from.length || from.some(item => !origins.includes(item))) throw Object.assign(new Error('Откуда сделки: api, inbox, manual'), {status: 400});
     const ids = body.user_ids === undefined ? json(old.user_ids_json, []) : body.user_ids;
@@ -94,14 +105,14 @@ export function registerDistribution(app, db, {auth, admin, audit}) {
     const active = body.active === undefined ? (old.active ?? 0) : body.active === true ? 1 : 0;
     const order = body.sort_order === undefined ? Number(old.sort_order ?? 0) : Number(body.sort_order);
     if (!Number.isInteger(order)) throw Object.assign(new Error('Порядок: целое число'), {status: 400});
-    return {name, pipeline, origins: [...new Set(from)], sources: [...new Set(sources.map(item => item.trim()).filter(Boolean))], ids: [...new Set(ids.map(Number))], title, type, active, order};
+    return {name, pipeline, conditions: conditions.map(item => ({field_id: Number(item.field_id), values: [...new Set(item.values.map(value => value.trim()).filter(Boolean))]})), origins: [...new Set(from)], sources: [...new Set(sources.map(item => item.trim()).filter(Boolean))], ids: [...new Set(ids.map(Number))], title, type, active, order};
   };
   const route = fn => async (req, res, next) => { try { await fn(req, res); } catch (error) { if (error.status) return res.status(error.status).json({error: error.message}); next(error); } };
   const list = async () => { const all = await users(); return (await db.prepare('SELECT * FROM deal_distribution_rules ORDER BY sort_order,id').all()).map(row => ruleView(row, all)); };
   app.get('/api/distribution/rules', auth, admin, route(async (req, res) => res.json(await list())));
   app.post('/api/distribution/rules', auth, admin, route(async (req, res) => {
     const rule = await read(req.body || {});
-    const row = await db.prepare('INSERT INTO deal_distribution_rules (name,pipeline_id,origins_json,sources_json,user_ids_json,task_title,task_type,active,sort_order) VALUES (?,?,?,?,?,?,?,?,?)').run(rule.name, rule.pipeline, JSON.stringify(rule.origins), JSON.stringify(rule.sources), JSON.stringify(rule.ids), rule.title, rule.type, rule.active, rule.order);
+    const row = await db.prepare('INSERT INTO deal_distribution_rules (name,pipeline_id,origins_json,sources_json,conditions_json,user_ids_json,task_title,task_type,active,sort_order) VALUES (?,?,?,?,?,?,?,?,?,?)').run(rule.name, rule.pipeline, JSON.stringify(rule.origins), JSON.stringify(rule.sources), JSON.stringify(rule.conditions), JSON.stringify(rule.ids), rule.title, rule.type, rule.active, rule.order);
     await audit(req, 'distribution.rule_created', {target: `distribution_rule:${row.lastInsertRowid}`, details: `${rule.name}${rule.active ? '' : ' (выключено)'}`});
     res.status(201).json((await list()).find(item => Number(item.id) === Number(row.lastInsertRowid)));
   }));
@@ -110,7 +121,7 @@ export function registerDistribution(app, db, {auth, admin, audit}) {
     if (!old) return res.status(404).json({error: 'Правило не найдено'});
     const rule = await read(req.body || {}, old);
     const usersChanged = JSON.stringify(rule.ids) !== JSON.stringify(json(old.user_ids_json, []));
-    await db.prepare('UPDATE deal_distribution_rules SET name=?,pipeline_id=?,origins_json=?,sources_json=?,user_ids_json=?,task_title=?,task_type=?,active=?,sort_order=?,next_index=CASE WHEN ? THEN 0 ELSE next_index END WHERE id=?').run(rule.name, rule.pipeline, JSON.stringify(rule.origins), JSON.stringify(rule.sources), JSON.stringify(rule.ids), rule.title, rule.type, rule.active, rule.order, usersChanged ? 1 : 0, old.id);
+    await db.prepare('UPDATE deal_distribution_rules SET name=?,pipeline_id=?,origins_json=?,sources_json=?,conditions_json=?,user_ids_json=?,task_title=?,task_type=?,active=?,sort_order=?,next_index=CASE WHEN ? THEN 0 ELSE next_index END WHERE id=?').run(rule.name, rule.pipeline, JSON.stringify(rule.origins), JSON.stringify(rule.sources), JSON.stringify(rule.conditions), JSON.stringify(rule.ids), rule.title, rule.type, rule.active, rule.order, usersChanged ? 1 : 0, old.id);
     if (!!old.active !== !!rule.active || usersChanged) await audit(req, 'distribution.rule_updated', {target: `distribution_rule:${old.id}`, details: [rule.name, !!old.active !== !!rule.active && (rule.active ? 'включено' : 'выключено'), usersChanged && 'сотрудники изменены'].filter(Boolean).join('; ')});
     res.json((await list()).find(item => Number(item.id) === Number(old.id)));
   }));
