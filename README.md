@@ -2,7 +2,7 @@
 
 **A self-hosted, open-source CRM for small sales teams.** Track a lead from the first request to a won or lost deal, with contacts, companies, tasks, and a customizable pipeline in one place.
 
-[Русская документация](README.ru.md) · [API and webhooks](docs/INTEGRATIONS.md) · [MVP scope](docs/MVP_SPEC.md) · [Contributing](CONTRIBUTING.md)
+[Русская документация](README.ru.md) · [API and webhooks](docs/INTEGRATIONS.md) · [Plugins](docs/PLUGINS.md) · [MVP scope](docs/MVP_SPEC.md) · [Contributing](CONTRIBUTING.md)
 
 **[Try the live demo on Polza Agency](https://polzaagency.ru/opencrm)** — browse the real interface with fictional data. The public demo is read-only; local demos can be edited.
 
@@ -21,7 +21,7 @@ OpenCRM is an independent project. It is not affiliated with amoCRM and does not
 - Connect external systems with scoped API keys: a full API v1 for deals, contacts, companies, tasks, notes, employees, custom fields and pipelines, and signed, retried webhooks for their changes.
 - Limit how deals move: per-pipeline stage transition rules and a lock that keeps deals in their pipeline.
 
-The application is designed for a team running its own instance. The [generic API and webhooks](docs/INTEGRATIONS.md) can connect it to other services. Connected mailboxes (IMAP/SMTP or Google Workspace) bring letters into the deal feed and let managers reply from the deal ([MAIL.md](docs/MAIL.md)). Built-in messaging, telephony, and amoCRM synchronization are **not** included; call and message records are entered manually.
+The application is designed for a team running its own instance. The [generic API and webhooks](docs/INTEGRATIONS.md) can connect it to other services. Connected mailboxes (IMAP/SMTP or Google Workspace) bring letters into the deal feed and let managers reply from the deal ([MAIL.md](docs/MAIL.md)). Built-in messaging, telephony, and amoCRM synchronization are **not** included; call and message records are entered manually. [Plugins](docs/PLUGINS.md) add pages, deal-card panels and incoming webhooks; a Tilda forms plugin is included as an example.
 
 ## Try it locally
 

@@ -16,7 +16,8 @@
     "backup:verify": "node scripts/backup.mjs verify",
     "backup:restore": "node --env-file-if-exists=.env scripts/backup.mjs restore",
     "test": "node --test tests/*.test.js",
-    "admin": "node --env-file-if-exists=.env scripts/admin.mjs"
+    "admin": "node --env-file-if-exists=.env scripts/admin.mjs",
+    "plugin": "node --env-file-if-exists=.env scripts/plugin.mjs"
   },
   "dependencies": {
     "@electric-sql/pglite": "0.5.16",
