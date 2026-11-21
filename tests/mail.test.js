@@ -323,25 +323,3 @@ test('mail: mailboxes sync, letters link to deals, replies keep the thread', asy
     rmSync(dir, {recursive: true, force: true});
   }
 });
-
-test('mail: scripts/mail-add.mjs reads the secret from a file and never prints it', async () => {
-  const {spawnSync} = await import('node:child_process');
-  const {writeFileSync} = await import('node:fs');
-  const dir = mkdtempSync(join(tmpdir(), 'opencrm-mail-cli-'));
-  try {
-    const password = 'cli-secret-pass-42';
-    writeFileSync(join(dir, 'pass.txt'), `${password}\n`);
-    const run = (...args) => spawnSync(process.execPath, ['scripts/mail-add.mjs', ...args], {encoding: 'utf8', env: {...process.env, NODE_ENV: 'test', PGLITE_DIR: join(dir, 'pg'), UPLOAD_DIR: join(dir, 'uploads'), DATABASE_URL: ''}});
-    const usage = run('--email', 'box@agency.test');
-    assert.equal(usage.status, 1);
-    assert.match(usage.stderr, /--google-sa-file FILE/);
-    const refused = run('--email', 'box@agency.test', '--password-file', join(dir, 'pass.txt'), '--imap-host', '127.0.0.1', '--imap-port', '1', '--smtp-host', '127.0.0.1');
-    assert.equal(refused.status, 1);
-    assert.match(refused.stderr, /IMAP 127\.0\.0\.1: .*ECONNREFUSED/);
-    assert.ok(!(refused.stdout + refused.stderr).includes(password));
-    writeFileSync(join(dir, 'sa.json'), '{"type":"service_account","client_email":"sync@p.iam.gserviceaccount.com","private_key":"not a key"}');
-    const badKey = run('--email', 'box@agency.test', '--google-sa-file', join(dir, 'sa.json'));
-    assert.equal(badKey.status, 1);
-    assert.match(badKey.stderr, /PRIVATE KEY|private_key/);
-  } finally { rmSync(dir, {recursive: true, force: true}); }
-});

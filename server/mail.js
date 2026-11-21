@@ -10,7 +10,7 @@
 // it is not set, a random key in <data>/secret.key (next to the uploads, outside the backups).
 import {createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, sign} from 'node:crypto';
 import {mkdirSync, readFileSync, writeFileSync} from 'node:fs';
-import {dirname, resolve} from 'node:path';
+import {dirname} from 'node:path';
 
 // The mail libraries load on first use, so they do not slow down the start of the server.
 let libraries;
@@ -388,12 +388,16 @@ async function checkConnection(mailbox, secret) {
   finally { transport.close?.(); }
 }
 
-// Where the encryption key file lives: next to the uploads directory, outside the backups.
-export function secretFilePath(uploadDir = process.env.UPLOAD_DIR || 'data/uploads') {
-  return resolve(process.env.OPENCRM_SECRET_FILE || resolve(uploadDir, '..', 'secret.key'));
-}
+export function registerMail(app, db, {auth, admin, audit, requirePermission, secretFile}) {
+  const box = createSecretBox(secretFile);
+  const route = fn => async (req, res, next) => {
+    try { await fn(req, res); }
+    catch (error) { if (error instanceof MailError) return res.status(error.status).json({error: error.message}); if (error?.message?.startsWith('Google не дал') || error?.message?.startsWith('Ключ сервисного')) return res.status(400).json({error: error.message}); next(error); }
+  };
+  const startSync = id => { void syncMailbox(db, box, id).catch(error => console.error(`Почта, ящик ${id}:`, error.message)); };
+  const listMailboxes = async () => (await db.prepare('SELECT m.*,(SELECT COUNT(*) FROM emails e WHERE e.mailbox_id=m.id) emails,(SELECT COUNT(*) FROM emails e WHERE e.mailbox_id=m.id AND e.deal_id IS NULL) unlinked FROM mailboxes m ORDER BY m.id').all()).map(row => mailboxView(row, box));
 
-function readSettings(box, body, old) {
+  function readSettings(body, old) {
     const authType = old?.auth_type ?? body.auth_type;
     if (!['password', 'google_sa'].includes(authType)) bad('Способ входа: password или google_sa');
     const email = old ? old.email : lower(body.email);
@@ -417,46 +421,26 @@ function readSettings(box, body, old) {
     const username = authType === 'password' ? (body.username === undefined ? (old?.username ?? '') : clean(body.username, 254)) || email : '';
     const enabled = body.enabled === undefined ? (old ? !!old.enabled : true) : body.enabled === true;
     return {email, name, auth_type: authType, ...servers, username, history_days: days, enabled, secret};
-}
-const accessDetails = settings => settings.auth_type === 'google_sa' ? `Google, сервисный аккаунт ${settings.secret.service_account.client_email}` : `IMAP ${settings.imap_host}, SMTP ${settings.smtp_host}`;
-
-// Shared by the settings page and scripts/mail-add.mjs: check the sign-in, then save.
-export async function addMailbox(db, box, body) {
-  const settings = readSettings(box, body || {});
-  if (await db.prepare('SELECT 1 FROM mailboxes WHERE email=?').get(settings.email)) bad('Этот ящик уже подключён');
-  await checkConnection(settings, settings.secret);
-  const row = await db.prepare('INSERT INTO mailboxes (email,name,auth_type,imap_host,imap_port,smtp_host,smtp_port,username,secret,history_days,enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(settings.email, settings.name, settings.auth_type, settings.imap_host, settings.imap_port, settings.smtp_host, settings.smtp_port, settings.username, box.seal(settings.secret), settings.history_days, settings.enabled ? 1 : 0);
-  return {id: row.lastInsertRowid, settings, details: accessDetails(settings)};
-}
-export async function changeMailbox(db, box, old, body) {
-  const settings = readSettings(box, body || {}, old);
-  const credentialsChanged = ['imap_host', 'imap_port', 'smtp_host', 'smtp_port', 'username', 'password', 'service_account'].some(key => body[key] !== undefined && body[key] !== '');
-  if (credentialsChanged && settings.enabled) await checkConnection(settings, settings.secret);
-  await db.prepare("UPDATE mailboxes SET name=?,imap_host=?,imap_port=?,smtp_host=?,smtp_port=?,username=?,secret=?,history_days=?,enabled=?,last_error=CASE WHEN ? THEN '' ELSE last_error END WHERE id=?").run(settings.name, settings.imap_host, settings.imap_port, settings.smtp_host, settings.smtp_port, settings.username, credentialsChanged ? box.seal(settings.secret) : old.secret, settings.history_days, settings.enabled ? 1 : 0, credentialsChanged ? 1 : 0, old.id);
-  return {settings, credentialsChanged, details: [credentialsChanged && `доступ изменён (${accessDetails(settings)})`, !!old.enabled !== settings.enabled && (settings.enabled ? 'включён' : 'выключен')].filter(Boolean).join('; ')};
-}
-
-export function registerMail(app, db, {auth, admin, audit, requirePermission, secretFile}) {
-  const box = createSecretBox(secretFile);
-  const route = fn => async (req, res, next) => {
-    try { await fn(req, res); }
-    catch (error) { if (error instanceof MailError) return res.status(error.status).json({error: error.message}); if (error?.message?.startsWith('Google не дал') || error?.message?.startsWith('Ключ сервисного')) return res.status(400).json({error: error.message}); next(error); }
-  };
-  const startSync = id => { void syncMailbox(db, box, id).catch(error => console.error(`Почта, ящик ${id}:`, error.message)); };
-  const listMailboxes = async () => (await db.prepare('SELECT m.*,(SELECT COUNT(*) FROM emails e WHERE e.mailbox_id=m.id) emails,(SELECT COUNT(*) FROM emails e WHERE e.mailbox_id=m.id AND e.deal_id IS NULL) unlinked FROM mailboxes m ORDER BY m.id').all()).map(row => mailboxView(row, box));
+  }
 
   app.get('/api/mail/mailboxes', auth, admin, route(async (_req, res) => res.json(await listMailboxes())));
   app.post('/api/mail/mailboxes', auth, admin, route(async (req, res) => {
-    const {id, settings, details} = await addMailbox(db, box, req.body);
-    await audit(req, 'mailbox.created', {target: `mailbox:${id} ${settings.email}`, details});
-    if (settings.enabled && process.env.NODE_ENV !== 'test') startSync(id);
-    res.status(201).json((await listMailboxes()).find(item => item.id === id));
+    const settings = readSettings(req.body || {});
+    if (await db.prepare('SELECT 1 FROM mailboxes WHERE email=?').get(settings.email)) bad('Этот ящик уже подключён');
+    await checkConnection(settings, settings.secret);
+    const row = await db.prepare('INSERT INTO mailboxes (email,name,auth_type,imap_host,imap_port,smtp_host,smtp_port,username,secret,history_days,enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(settings.email, settings.name, settings.auth_type, settings.imap_host, settings.imap_port, settings.smtp_host, settings.smtp_port, settings.username, box.seal(settings.secret), settings.history_days, settings.enabled ? 1 : 0);
+    await audit(req, 'mailbox.created', {target: `mailbox:${row.lastInsertRowid} ${settings.email}`, details: settings.auth_type === 'google_sa' ? `Google, сервисный аккаунт ${settings.secret.service_account.client_email}` : `IMAP ${settings.imap_host}, SMTP ${settings.smtp_host}`});
+    if (settings.enabled && process.env.NODE_ENV !== 'test') startSync(row.lastInsertRowid);
+    res.status(201).json((await listMailboxes()).find(item => item.id === row.lastInsertRowid));
   }));
   app.patch('/api/mail/mailboxes/:id', auth, admin, route(async (req, res) => {
     const old = await db.prepare('SELECT * FROM mailboxes WHERE id=?').get(Number(req.params.id) || 0);
     if (!old) throw new MailError(404, 'Ящик не найден');
-    const body = req.body || {}, {settings, credentialsChanged, details} = await changeMailbox(db, box, old, body);
-    await audit(req, 'mailbox.updated', {target: `mailbox:${old.id} ${old.email}`, details});
+    const body = req.body || {}, settings = readSettings(body, old);
+    const credentialsChanged = ['imap_host', 'imap_port', 'smtp_host', 'smtp_port', 'username', 'password', 'service_account'].some(key => body[key] !== undefined && body[key] !== '');
+    if (credentialsChanged && settings.enabled) await checkConnection(settings, settings.secret);
+    await db.prepare("UPDATE mailboxes SET name=?,imap_host=?,imap_port=?,smtp_host=?,smtp_port=?,username=?,secret=?,history_days=?,enabled=?,last_error=CASE WHEN ? THEN '' ELSE last_error END WHERE id=?").run(settings.name, settings.imap_host, settings.imap_port, settings.smtp_host, settings.smtp_port, settings.username, credentialsChanged ? box.seal(settings.secret) : old.secret, settings.history_days, settings.enabled ? 1 : 0, credentialsChanged ? 1 : 0, old.id);
+    await audit(req, 'mailbox.updated', {target: `mailbox:${old.id} ${old.email}`, details: [credentialsChanged && 'доступ изменён', !!old.enabled !== settings.enabled && (settings.enabled ? 'включён' : 'выключен')].filter(Boolean).join('; ')});
     if (settings.enabled && (credentialsChanged || !old.enabled) && process.env.NODE_ENV !== 'test') startSync(old.id);
     res.json((await listMailboxes()).find(item => item.id === old.id));
   }));

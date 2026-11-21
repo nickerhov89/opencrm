@@ -36,7 +36,17 @@ Run the commands in the app container (`docker compose -p opencrm exec opencrm .
 
 ### Adding the history to a CRM loaded earlier
 
-Exports made before the card history was added have no `events_history.json`. To add the history without loading everything again (and without losing what was done in OpenCRM since), run `export` again — the files already downloaded are kept, only the history is fetched — and then:
+Exports made before the card history was added have no `events_history.json`. The simplest way is automatic: put the amoCRM address and token into `.env` next to `compose.yaml`
+
+```sh
+AMO_BASE_URL=https://<subdomain>.amocrm.ru
+AMO_ACCESS_TOKEN=<long-lived token>
+# AMO_PROXY_URL=http://[user:password@]host:port   if amoCRM is reached through a proxy
+```
+
+and deploy (or `docker compose -p opencrm up -d`). After start the server downloads the events of deals, contacts and companies in the background and writes the history of the records already in the CRM; the log shows the progress (`docker compose -p opencrm logs -f opencrm | grep amoCRM`). It happens once: the CRM remembers it (`app_settings` key `amocrm_history_loaded`; a `load` or `history` with events sets it too), and a run interrupted by a restart starts again from the beginning on the next start. Afterwards the token can be removed from `.env`.
+
+By hand instead: run `export` again — the files already downloaded are kept, only the history is fetched — and then:
 
 ```sh
 docker compose -p opencrm exec opencrm node scripts/amocrm-import.mjs history --dry-run
