@@ -587,6 +587,35 @@ export function registerMail(app, db, {auth, admin, audit, requirePermission, se
     res.status(201).json(emailView({...sent, author: req.user.name}));
   }));
 
+  // Letter templates: every employee who writes letters picks from them; administrators edit them.
+  const templateInput = body => {
+    const name = String(body?.name ?? '').trim().slice(0, 120), subject = String(body?.subject ?? '').trim().slice(0, 500), text = String(body?.body ?? '').slice(0, 50000);
+    if (!name) bad('Укажите название шаблона');
+    if (!subject && !text.trim()) bad('Шаблон пустой: заполните тему или текст');
+    return {name, subject, text};
+  };
+  app.get('/api/mail/templates', auth, route(async (_req, res) => res.json(await db.prepare('SELECT id,name,subject,body,updated_at FROM email_templates ORDER BY lower(name),id').all())));
+  app.post('/api/mail/templates', auth, admin, route(async (req, res) => {
+    const item = templateInput(req.body);
+    const id = (await db.prepare('INSERT INTO email_templates (name,subject,body,created_by) VALUES (?,?,?,?)').run(item.name, item.subject, item.text, req.user.id)).lastInsertRowid;
+    await audit(req, 'email_template.created', {target: `email_template:${id}`, details: item.name});
+    res.status(201).json(await db.prepare('SELECT id,name,subject,body,updated_at FROM email_templates WHERE id=?').get(id));
+  }));
+  app.patch('/api/mail/templates/:id', auth, admin, route(async (req, res) => {
+    const item = templateInput(req.body), id = Number(req.params.id) || 0;
+    const result = await db.prepare('UPDATE email_templates SET name=?,subject=?,body=?,updated_at=now_text() WHERE id=?').run(item.name, item.subject, item.text, id);
+    if (!result.changes) throw new MailError(404, 'Шаблон не найден');
+    await audit(req, 'email_template.updated', {target: `email_template:${id}`, details: item.name});
+    res.json(await db.prepare('SELECT id,name,subject,body,updated_at FROM email_templates WHERE id=?').get(id));
+  }));
+  app.delete('/api/mail/templates/:id', auth, admin, route(async (req, res) => {
+    const id = Number(req.params.id) || 0, row = await db.prepare('SELECT name FROM email_templates WHERE id=?').get(id);
+    if (!row) throw new MailError(404, 'Шаблон не найден');
+    await db.prepare('DELETE FROM email_templates WHERE id=?').run(id);
+    await audit(req, 'email_template.deleted', {target: `email_template:${id}`, details: row.name});
+    res.json({ok: true});
+  }));
+
   // Deal routes: the /api/deals/:id middleware has already checked the deal and the user's access to it.
   const dealLetter = async req => {
     const row = await db.prepare(`${emailSelect} WHERE e.id=? AND e.deal_id=?`).get(Number(req.params.emailId) || 0, Number(req.params.id));

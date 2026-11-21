@@ -15,6 +15,9 @@
 
 ## Unreleased — closer to amoCRM
 
+- Analytics → **Звонки**: incoming and outgoing calls of each employee with their length (by count or by duration), the average and the total, and the latest calls with links to the deal, contact or company and the recording. Counts calls loaded from amoCRM, calls recorded in the deal feed and calls of the Mango Office plugin, each once.
+- Analytics → **Цели**: a monthly goal per employee by budget and by number of won deals, with progress from won deals closed that month (administrators set them in **Настройки целей**).
+- Letter templates (Settings → Почта → **Шаблоны писем**): «Новое письмо» and the letter from a deal fill the subject and the text from a template.
 - Stage transition rules can bind administrators too (**Правила действуют и на администраторов**), like the amoCRM funnel guard; a refused move names the stages the deal may go to.
 - Distribution rules can also check other deal custom fields (for example «Подысточник» = «Автоаутрич EN»); every condition must hold, case is ignored.
 - The desktop opens on «Сегодня»; board cards show how many days the earliest open task is overdue («3 дн.»).

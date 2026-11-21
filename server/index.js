@@ -8,6 +8,7 @@ import { parseCsv, quoteCsvCell } from './csv.js';
 import { registerIntegrations } from './integrations.js';
 import { registerMail, dealEmails, secretFilePath } from './mail.js';
 import { registerNotifications } from './notifications.js';
+import { registerReports } from './reports.js';
 import { registerDistribution, queueDistribution } from './distribution.js';
 import { registerPlugins } from './plugins.js';
 import { createStageRules, RuleError } from './stage-rules.js';
@@ -983,6 +984,7 @@ function registerPurge(){
 registerIntegrations(app,db,{auth,admin,audit,event,entityEvent,logEntityChanges,logDealChanges,runStageAutomation,customValueError,parseTags,taskSchedule,stageRules});
 registerMail(app,db,{auth,admin,audit,requirePermission,secretFile:secretFilePath(uploadDir)});
 registerNotifications(app,db,{auth});
+registerReports(app,db,{auth,admin,audit});
 registerDistribution(app,db,{auth,admin,audit});
 const plugins=registerPlugins(app,db,{auth,admin,audit,uploadDir,secretFile:secretFilePath(uploadDir)});await plugins.start();
 registerPurge();

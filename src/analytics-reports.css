@@ -1,0 +1,77 @@
+/* Analytics → Звонки and Цели */
+.calls-legend{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#6b7781}
+.calls-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-left:8px}
+.calls-legend i:first-child{margin-left:0}
+.calls-legend i.in,.calls-bar i.in{background:#f2c46d}
+.calls-legend i.out,.calls-bar i.out{background:#4f9ad8}
+.calls-bar i.time{background:#8fb8de}
+.calls-legend i.done,.goals-track i.done{background:#83c8aa}
+.calls-legend i.goal{background:#dfe5ea}
+.calls-row{display:grid;grid-template-columns:220px 1fr;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #f0f2f3}
+.calls-row:last-child{border-bottom:0}
+.calls-name{display:flex;flex-direction:column;align-items:flex-end;text-align:right;min-width:0}
+.calls-name strong{font-size:13px;color:#2c3a45;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.calls-name small{font-size:11px;color:#8a969e}
+.calls-row.average .calls-name strong,.calls-row.total .calls-name strong{font-weight:400;color:#6b7781}
+.calls-bar{display:flex;align-items:center;gap:10px;min-width:0}
+.calls-bar>div{display:flex;height:22px;border-radius:2px;overflow:hidden;flex:0 1 auto}
+.calls-bar>div i{display:block;height:100%}
+.calls-row.average .calls-bar>div i,.calls-row.total .calls-bar>div i{background:#b8c1c8}
+.calls-bar b{font-size:16px;font-weight:500;color:#2c3a45;white-space:nowrap}
+.calls-bar small{font-size:11px;color:#8a969e;white-space:nowrap}
+.calls-filter{margin-left:auto}
+.calls-table{padding:0}
+.calls-head,.calls-line{display:grid;grid-template-columns:150px minmax(0,1fr) 220px 80px;gap:12px;align-items:center;padding:10px 18px;border-bottom:1px solid #eef0f1;font-size:13px;color:#2c3a45}
+.calls-head{font-size:11px;color:#8a969e;font-weight:600}
+.calls-line time{color:#5c6870;white-space:nowrap}
+.calls-line>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.calls-line button{border:0;background:none;padding:0;color:#2f6db0;cursor:pointer;font:inherit;text-decoration:underline;text-decoration-color:#bcd1e6}
+.calls-line em{font-style:normal;color:#5c6870}
+.calls-result{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.calls-result button.calls-play,.calls-result a.calls-play{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border:1px solid #cfd8de;border-radius:50%;color:#4f7fae;text-decoration:none}
+.calls-result audio{width:100%;height:32px}
+.goals-heading{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.goals-month{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:#2c3a45}
+.goals-month span{min-width:120px;text-align:center}
+.goals-month button,.goals-settings{border:1px solid #cfd8de;background:#fff;color:#4b5a65;height:28px;display:inline-flex;align-items:center;gap:6px;padding:0 8px;cursor:pointer;font-size:12px}
+.goals-settings{margin-left:auto}
+.goals-hint{font-size:12px;color:#6b7781;padding:10px 0 4px}
+.goals-row{display:grid;grid-template-columns:220px 1fr;gap:16px;align-items:center;padding:10px 0;border-bottom:1px solid #f0f2f3}
+.goals-row:last-child{border-bottom:0}
+.goals-row>strong{font-size:13px;color:#2c3a45;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.goals-row.total>strong{font-weight:700}
+.goals-bar{display:flex;flex-direction:column;gap:4px;min-width:0}
+.goals-track{position:relative;height:14px;background:#f3f5f6;border-radius:2px;overflow:hidden}
+.goals-track i{position:absolute;left:0;top:0;bottom:0;display:block}
+.goals-track i.goal{background:#dfe5ea}
+.goals-row.behind .goals-track i.done{background:#e5a1a1}
+.goals-bar span{font-size:12px;color:#5c6870}
+.goals-form{padding:16px 20px}
+.goals-form p{font-size:12px;color:#6b7781;margin:0 0 12px}
+.goals-form-head,.goals-form-row{display:grid;grid-template-columns:minmax(0,1fr) 180px 140px;gap:12px;align-items:center;padding:6px 0}
+.goals-form-head{font-size:11px;color:#8a969e;font-weight:600}
+.goals-form-row strong{font-size:13px;color:#2c3a45;font-weight:500}
+.goals-form-row input{height:32px;border:1px solid #cfd8de;padding:0 8px;font:inherit;font-size:13px;min-width:0}
+.goals-form-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:12px}
+.goals-form-actions button[type=button]{border:1px solid #cbd3d8;background:#fff;color:#4b5a65;font-size:12px;padding:0 16px;min-height:36px;cursor:pointer}
+@media(max-width:700px){
+  .calls-row,.goals-row{grid-template-columns:1fr;gap:4px}
+  .calls-name{align-items:flex-start;text-align:left}
+  .goals-row>strong{text-align:left}
+  .calls-head{display:none}
+  .calls-line{grid-template-columns:1fr auto;padding:10px 14px}
+  .calls-line time{grid-column:1/-1;font-size:11px}
+  .goals-form-head{display:none}
+  .goals-form-row{grid-template-columns:1fr 1fr}
+  .goals-form-row strong{grid-column:1/-1}
+}
+/* Chart fills are data colors: in the dark theme they keep their meaning instead of being dimmed. */
+:root[data-theme=dark] .calls-legend i.in,:root[data-theme=dark] .calls-bar i.in{background:#e0a94a}
+:root[data-theme=dark] .calls-legend i.out,:root[data-theme=dark] .calls-bar i.out{background:#4f9ad8}
+:root[data-theme=dark] .calls-bar i.time{background:#6fa3d4}
+:root[data-theme=dark] .calls-row.average .calls-bar>div i,:root[data-theme=dark] .calls-row.total .calls-bar>div i{background:#6b7d8c}
+:root[data-theme=dark] .calls-legend i.done,:root[data-theme=dark] .goals-track i.done{background:#5fb38e}
+:root[data-theme=dark] .goals-row.behind .goals-track i.done{background:#d27b7b}
+:root[data-theme=dark] .calls-legend i.goal,:root[data-theme=dark] .goals-track i.goal{background:#3b4d5c}
+.calls-chart,.goals-chart{padding:0 20px 8px}
+.calls-chart .analytics-tabs,.goals-chart .analytics-tabs{margin:0 -20px 6px}
