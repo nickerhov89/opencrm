@@ -263,7 +263,7 @@ END $$;
 -- updated_at moves when the row really changes, unless the statement sets updated_at itself.
 CREATE OR REPLACE FUNCTION trg_touch_updated_at() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF NEW.updated_at IS NOT DISTINCT FROM OLD.updated_at AND (to_jsonb(OLD) - 'updated_at') IS DISTINCT FROM (to_jsonb(NEW) - 'updated_at') THEN
+  IF NEW.updated_at IS NOT DISTINCT FROM OLD.updated_at AND (to_jsonb(OLD) - 'updated_at') IS DISTINCT FROM (to_jsonb(NEW) - 'updated_at') AND coalesce(current_setting('opencrm.source_mirror', true), '') <> '1' THEN
     NEW.updated_at := now_text();
   END IF;
   RETURN NEW;
@@ -310,6 +310,35 @@ END $$;
 DROP TRIGGER IF EXISTS trg_deal_closed_at ON deals;
 CREATE TRIGGER trg_deal_closed_at BEFORE INSERT OR UPDATE OF stage_id ON deals FOR EACH ROW EXECUTE FUNCTION trg_deal_closed_at();
 CREATE INDEX IF NOT EXISTS idx_deals_closed ON deals(closed_at) WHERE closed_at IS NOT NULL;
+
+-- deals.source mirrors the deal custom field «Источник» (amoCRM moves and the portal write the source
+-- there). Any write of the field — interface, API, import — updates the source; the deal's updated_at
+-- does not move, as it does not for other custom fields.
+CREATE OR REPLACE FUNCTION trg_deal_source_mirror() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE row_field BIGINT; row_entity BIGINT; row_value TEXT;
+BEGIN
+  IF TG_OP = 'DELETE' THEN row_field := OLD.field_id; row_entity := OLD.entity_id; row_value := '';
+  ELSE row_field := NEW.field_id; row_entity := NEW.entity_id; row_value := NEW.value; END IF;
+  IF EXISTS (SELECT 1 FROM custom_fields f WHERE f.id = row_field AND f.entity_type = 'deal' AND lower(btrim(f.name)) = 'источник') THEN
+    PERFORM set_config('opencrm.source_mirror', '1', true);
+    UPDATE deals SET source = row_value WHERE id = row_entity AND source IS DISTINCT FROM row_value;
+    PERFORM set_config('opencrm.source_mirror', '', true);
+  END IF;
+  RETURN NULL;
+END $$;
+-- Who completed a task: the employee acting in the transaction (NULL for the API, robots and imports).
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS completed_by BIGINT REFERENCES users(id) ON DELETE SET NULL;
+CREATE OR REPLACE FUNCTION trg_task_completed_by() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.completed_at IS NULL THEN NEW.completed_by := NULL;
+  ELSIF OLD.completed_at IS NULL THEN NEW.completed_by := COALESCE(NEW.completed_by, current_actor_id('user'));
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_task_completed_by ON tasks;
+CREATE TRIGGER trg_task_completed_by BEFORE UPDATE OF completed_at ON tasks FOR EACH ROW EXECUTE FUNCTION trg_task_completed_by();
+DROP TRIGGER IF EXISTS trg_deal_source_mirror ON custom_field_values;
+CREATE TRIGGER trg_deal_source_mirror AFTER INSERT OR UPDATE OR DELETE ON custom_field_values FOR EACH ROW EXECUTE FUNCTION trg_deal_source_mirror();
 
 -- Stage history: one row per deal creation (from_* empty) and per stage change.
 DO $$
@@ -423,7 +452,7 @@ CREATE OR REPLACE FUNCTION trg_webhook_deal_updated() RETURNS trigger LANGUAGE p
 BEGIN
   IF OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL THEN
     PERFORM webhook_emit('deal.deleted', webhook_deal_payload(NEW)::json);
-  ELSIF NEW.deleted_at IS NULL AND (to_jsonb(OLD) - 'updated_at') IS DISTINCT FROM (to_jsonb(NEW) - 'updated_at') THEN
+  ELSIF NEW.deleted_at IS NULL AND (to_jsonb(OLD) - 'updated_at') IS DISTINCT FROM (to_jsonb(NEW) - 'updated_at') AND coalesce(current_setting('opencrm.source_mirror', true), '') <> '1' THEN
     PERFORM webhook_emit('deal.updated', webhook_deal_payload(NEW)::json);
   END IF;
   RETURN NULL;
@@ -483,6 +512,15 @@ DROP TRIGGER IF EXISTS trg_webhook_deal_note ON notes;
 CREATE TRIGGER trg_webhook_deal_note AFTER INSERT ON notes FOR EACH ROW EXECUTE FUNCTION trg_webhook_deal_note();
 DROP TRIGGER IF EXISTS trg_webhook_entity_note ON entity_notes;
 CREATE TRIGGER trg_webhook_entity_note AFTER INSERT ON entity_notes FOR EACH ROW EXECUTE FUNCTION trg_webhook_entity_note();
+-- Fill deals.source from «Источник» for deals loaded before the mirror existed. After the webhook
+-- triggers above, so it neither touches updated_at nor sends deal.updated.
+DO $$
+BEGIN
+  PERFORM set_config('opencrm.source_mirror', '1', true);
+  UPDATE deals d SET source = v.value FROM custom_field_values v JOIN custom_fields f ON f.id = v.field_id AND f.entity_type = 'deal' AND lower(btrim(f.name)) = 'источник'
+    WHERE v.entity_id = d.id AND d.source IS DISTINCT FROM v.value;
+  PERFORM set_config('opencrm.source_mirror', '', true);
+END $$;
 `;
 
 const defaultStages = [

@@ -158,10 +158,18 @@ export async function parseMessage(source, {mailboxEmail, uid, folder, mailboxId
 async function connectedAddresses(db) {
   return new Set((await db.prepare('SELECT email FROM mailboxes').all()).map(row => lower(row.email)));
 }
-// Every address stored on a live contact or company (amoCRM loads keep several, comma-separated).
-async function knownAddresses(db) {
-  const rows = await db.prepare("SELECT email FROM contacts WHERE deleted_at IS NULL AND email<>'' UNION ALL SELECT email FROM companies WHERE deleted_at IS NULL AND email<>''").all();
-  return new Set(rows.flatMap(row => lower(row.email).split(/[,;\s]+/)).filter(Boolean));
+// Every address stored on a live contact or company (amoCRM loads keep several, comma-separated):
+// address → ids of its contacts and companies. Built once per sync run with one pass over both
+// tables, so linking a letter never scans the deals.
+export async function knownAddresses(db) {
+  const rows = await db.prepare("SELECT 'contact' kind,id,email FROM contacts WHERE deleted_at IS NULL AND email<>'' UNION ALL SELECT 'company' kind,id,email FROM companies WHERE deleted_at IS NULL AND email<>''").all();
+  const index = new Map();
+  for (const row of rows) for (const address of lower(row.email).split(/[,;\s]+/)) {
+    if (!address.includes('@')) continue;
+    if (!index.has(address)) index.set(address, {contacts: [], companies: []});
+    index.get(address)[row.kind === 'contact' ? 'contacts' : 'companies'].push(Number(row.id));
+  }
+  return index;
 }
 // Subject without Re:/Fwd: prefixes and Instantly-style [#XXXXXXXX] tags, for the subject rule.
 export function subjectKey(subject) {
@@ -187,23 +195,24 @@ export async function letterDirection(db, letter, dealId, own) {
   const domain = domainOf(from);
   return domain && !publicDomains.has(domain) && [...client].some(address => domainOf(address) === domain) ? 'incoming' : 'outgoing';
 }
-const emailListSql = column => `string_to_array(regexp_replace(lower(${column}),'[;\\s]+',',','g'),',')`;
+const inList = ids => ids.length ? ids.map(() => '?').join(',') : 'NULL';
 export async function findDeal(db, letter, {own, known}) {
   const refs = [...new Set([letter.in_reply_to, ...(letter.references || [])].filter(Boolean))];
   if (refs.length) {
     const parent = await db.prepare(`SELECT e.deal_id FROM emails e JOIN deals d ON d.id=e.deal_id WHERE d.deleted_at IS NULL AND e.message_id IN (${refs.map(() => '?').join(',')}) ORDER BY e.sent_at DESC,e.id DESC LIMIT 1`).get(...refs);
     if (parent) return {deal_id: parent.deal_id, linked_by: 'thread'};
   }
-  const people = participants(letter, own).filter(address => !known || known.has(address));
+  const index = known || await knownAddresses(db);
+  const people = participants(letter, own).filter(address => index.has(address));
   if (!people.length) return await bySubject(db, letter, own);
-  const list = `ARRAY[${people.map(() => '?').join(',')}]::text[]`;
+  const contacts = [...new Set(people.flatMap(address => index.get(address).contacts))].slice(0, 500);
+  const companies = [...new Set(people.flatMap(address => index.get(address).companies))].slice(0, 500);
+  // Deals of those contacts (main or linked) and companies, found through the contact and company indexes.
   const deal = await db.prepare(`SELECT d.id,
-      CASE WHEN EXISTS(SELECT 1 FROM contacts c WHERE c.deleted_at IS NULL AND (c.id=d.contact_id OR c.id IN (SELECT dc.contact_id FROM deal_contacts dc WHERE dc.deal_id=d.id)) AND ${emailListSql('c.email')} && ${list}) THEN 1 ELSE 0 END by_contact
+      CASE WHEN d.contact_id IN (${inList(contacts)}) OR EXISTS(SELECT 1 FROM deal_contacts dc WHERE dc.deal_id=d.id AND dc.contact_id IN (${inList(contacts)})) THEN 1 ELSE 0 END by_contact
     FROM deals d JOIN stages s ON s.id=d.stage_id
-    WHERE d.deleted_at IS NULL AND (
-      EXISTS(SELECT 1 FROM contacts c WHERE c.deleted_at IS NULL AND (c.id=d.contact_id OR c.id IN (SELECT dc.contact_id FROM deal_contacts dc WHERE dc.deal_id=d.id)) AND ${emailListSql('c.email')} && ${list})
-      OR EXISTS(SELECT 1 FROM companies co WHERE co.deleted_at IS NULL AND co.id=d.company_id AND ${emailListSql('co.email')} && ${list}))
-    ORDER BY by_contact DESC, CASE WHEN s.kind='active' THEN 0 ELSE 1 END, d.updated_at DESC, d.id DESC LIMIT 1`).get(...people, ...people, ...people);
+    WHERE d.deleted_at IS NULL AND (d.contact_id IN (${inList(contacts)}) OR d.id IN (SELECT dc.deal_id FROM deal_contacts dc WHERE dc.contact_id IN (${inList(contacts)})) OR d.company_id IN (${inList(companies)}))
+    ORDER BY by_contact DESC, CASE WHEN s.kind='active' THEN 0 ELSE 1 END, d.updated_at DESC, d.id DESC LIMIT 1`).get(...contacts, ...contacts, ...contacts, ...contacts, ...companies);
   return deal ? {deal_id: deal.id, linked_by: 'address'} : await bySubject(db, letter, own);
 }
 // Last resort for threads with incomplete References (Instantly): the same subject with the same
