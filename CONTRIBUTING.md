@@ -24,4 +24,6 @@ npm test
 npm run build
 ```
 
+Write styles with ordinary colors for the light theme: the build adds a dark twin of every rule that sets a color (`scripts/dark-theme.mjs`), so new screens get the dark theme automatically. Check a new screen in both themes (the «Тема» button in the left menu). Text placed on a color that comes from data (stage colors) needs a hand-written rule in `src/theme.css`.
+
 Add a test when you change API behavior or fix a regression. Update documentation when the user-visible workflow changes. Do not commit `.env`, databases, backups, uploads, API keys, or real customer data. The project uses MIT licensing; by submitting a contribution, you agree that it may be distributed under that license.

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — dark theme
+
+- Dark theme in the style of amoCRM (blue-black surfaces, light text): «Тема» at the bottom of the left menu and Settings → General offer «Авто» (follows the system), «Светлая», «Тёмная». The choice is saved per employee (`PUT /api/me/theme`, `theme` in `/api/me`) and in the browser, applied before the first paint, and switches with a circle spreading from the button.
+- The light styles are unchanged: at build time every CSS rule that sets a color gets a dark twin under `:root[data-theme=dark]` (`scripts/dark-theme.mjs`), so new styles get the dark theme without extra work. The landing page and public forms stay light.
+
 ## Unreleased — closer to amoCRM
 
 - Stage transition rules can bind administrators too (**Правила действуют и на администраторов**), like the amoCRM funnel guard; a refused move names the stages the deal may go to.

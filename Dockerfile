@@ -7,6 +7,9 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY index.html vite.config.js ./
+# public: favicon and the script that applies the theme before the first paint; dark-theme.mjs runs during the build.
+COPY public ./public
+COPY scripts/dark-theme.mjs ./scripts/dark-theme.mjs
 COPY src ./src
 COPY server ./server
 RUN npm run build && npm prune --omit=dev

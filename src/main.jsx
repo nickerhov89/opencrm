@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { LayoutDashboard, KanbanSquare, CheckCircle2, UsersRound, BarChart3, Settings, Search, Plus, ArrowLeft, Clock3, LogOut, X, Menu, Download, Upload, MessageSquareText, UserRound, List, Columns3, MoreHorizontal, Mail, Bell } from 'lucide-react';
 import MailPage from './MailPage.jsx';
 import NotificationsPanel from './NotificationsPanel.jsx';
+import ThemeSwitcher from './ThemeSwitcher.jsx';
+import {setTheme} from './theme.js';
 import TasksView from './TasksView.jsx';
 import EntityPage from './EntityPage.jsx';
 import Dashboard from './Dashboard.jsx';
@@ -37,6 +39,7 @@ import GlobalSearch from './GlobalSearch.jsx';
 import {parseRoute,pathForView,pathForDeal,pathForEntity} from './route.js';
 import {appBase,appPath} from './app-base.js';
 import './demo.css';
+import './theme.css';
 import UserAccessActions from './UserAccessActions.jsx';
 
 async function api(path, options={}) {
@@ -79,6 +82,7 @@ function App(){
   const loadNotifyCount=()=>api('/notifications/count').then(result=>setNotifyCount(result.unseen)).catch(()=>{});
   useEffect(()=>{if(!auth)return;loadMailSummary();loadNotifyCount();const timer=setInterval(()=>{if(document.visibilityState!=='hidden'){loadMailSummary();loadNotifyCount()}},60000);return()=>clearInterval(timer)},[auth]);
   useEffect(()=>{if(auth)api('/settings').then(data=>setAccountName(data.name)).catch(message)},[auth]);
+  useEffect(()=>{if(auth?.theme)setTheme(auth.theme)},[auth?.id]);
   useEffect(()=>{if(auth)api('/me/deal-filters').then(setSavedDealFilters).catch(message);else{setSavedDealFilters([]);setActiveSavedDealFilterId(null)}},[auth]);
   useEffect(()=>{if(!auth)return;const keydown=event=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='k'){event.preventDefault();setGlobalSearch({section:null,query:''})}};window.addEventListener('keydown',keydown);return()=>window.removeEventListener('keydown',keydown)},[auth]);
   useEffect(()=>{if(!auth||!pipeline)return;let live=true;api('/pipelines/'+pipeline+'/card-layout').then(result=>{if(live){setDealCardFields(result.fields);setDealCardShowAvatar(result.show_avatar)}}).catch(message);return()=>{live=false}},[auth,pipeline]);
@@ -118,6 +122,7 @@ function App(){
       <button className="account-avatar" onClick={()=>go('settings')} title={auth.name}><UserRound size={23}/><span>Аккаунт</span></button>
       <nav><button className="nav-item global-search-nav" title="Общий поиск · ⌘K" aria-label="Общий поиск" onClick={()=>{setMobileMenu(false);setGlobalSearch({section:null,query:''})}}><Search size={24} strokeWidth={1.45}/><span>Поиск</span></button>{nav.map(([key,Icon,label])=><button key={key} className={'nav-item '+((view===key||(['deal','pipeline-settings','inbox'].includes(view)&&key==='deals')||(key==='lists'&&['contacts','companies','all','entity','files'].includes(view)))?'active':'')} onClick={()=>{if(key==='lists'){setDealMenu(false);setListMenu(!listMenu)}else if(key==='deals'){setListMenu(false);setDealMenu(!dealMenu)}else go(key)}} title={label}><Icon size={24} strokeWidth={1.45}/><span>{label}</span>{key==='tasks'&&tasks.filter(t=>!t.completed_at).length>0&&<b className="nav-badge">{tasks.filter(t=>!t.completed_at).length}</b>}{key==='mail'&&mailSummary?.unread>0&&<b className="nav-badge">{mailSummary.unread>99?'99+':mailSummary.unread}</b>}</button>)}</nav>
       <button className={'side-messages'+(notifyOpen?' active':'')} title="Уведомления: задачи, письма, заявки" aria-label="Уведомления" onClick={()=>{setMobileMenu(false);setListMenu(false);setDealMenu(false);setNotifyOpen(value=>!value)}}><Bell size={22} strokeWidth={1.45}/><span>Сообщения</span>{notifyCount>0&&<b className="nav-badge">{notifyCount>99?'99+':notifyCount}</b>}</button>
+      <ThemeSwitcher onSave={theme=>api('/me/theme',{method:'PUT',body:{theme}}).then(()=>setAuth(current=>current&&{...current,theme})).catch(message)}/>
       <div className="side-bottom"><div className="brand-mark">o</div><span>OpenCRM</span></div>
     </aside>
     {listMenu&&<><button className="lists-scrim" aria-label="Закрыть меню списков" onClick={()=>setListMenu(false)}></button><div className="lists-flyout"><h2>СПИСКИ</h2><button className={view==='contacts'?'selected':''} onClick={()=>go('contacts')}>Контакты</button><button className={view==='companies'?'selected':''} onClick={()=>go('companies')}>Компании</button><button className={view==='all'?'selected':''} onClick={()=>go('all')}>Все контакты и компании</button><button className={view==='files'?'selected':''} onClick={()=>go('files')}>Файлы</button></div></>}
