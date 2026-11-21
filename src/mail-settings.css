@@ -1,0 +1,17 @@
+.mail-form textarea{width:100%;border:1px solid #cbd2d7;border-radius:2px;padding:7px 10px;font:inherit;font-size:11px;color:#394a57;font-family:ui-monospace,Consolas,monospace}
+.mail-form>label small{color:#8a98a3;line-height:1.45}
+.mail-form-pair{display:flex;gap:10px;flex:2;min-width:260px}
+.mail-form-pair label{display:flex;flex-direction:column;gap:6px;font-size:11px;color:#65727d;flex:3}
+.mail-form-pair label:last-child{flex:1;min-width:70px}
+.mail-form-pair input{width:100%;height:36px;border:1px solid #cbd2d7;border-radius:2px;padding:7px 10px;font:inherit;color:#394a57}
+.mail-box-row{align-items:flex-start}
+.mail-box-error{color:#c75d5d!important}
+.mail-box-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px}
+.mail-secret-form{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;align-items:center}
+.mail-secret-form input,.mail-secret-form textarea{flex:1;min-width:200px;border:1px solid #cbd2d7;border-radius:2px;padding:6px 8px;font-size:12px}
+.mail-secret-form .blue-btn{color:#fff!important;padding:6px 12px!important}
+.mail-unlinked-row p{margin:4px 0 0;font-size:11px;color:#6f7d87;overflow-wrap:anywhere}
+.mail-unlinked-row form{display:flex;align-items:center;gap:6px}
+.mail-unlinked-row input{width:90px;height:30px;border:1px solid #cbd2d7;border-radius:2px;padding:4px 8px;font-size:12px}
+@media(max-width:850px){.mail-box-actions{justify-content:flex-start;width:100%}.mail-unlinked-row form{width:100%}}
+@media(max-width:500px){.mail-form-pair{min-width:0;flex-basis:100%}}

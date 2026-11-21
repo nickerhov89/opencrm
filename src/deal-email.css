@@ -1,0 +1,28 @@
+.deal-email{border-left:3px solid #8bb8df!important}
+.deal-email.outgoing{border-left-color:#8fc6a0!important}
+.deal-email .timeline-icon{border-color:#9bc3e5;color:#4e89b8}
+.deal-email.outgoing .timeline-icon{border-color:#a5d3b3;color:#4f8f63}
+.deal-email-body{min-width:0;flex:1}
+.deal-email-body>strong{display:block;font-size:12px;color:#3e5568;margin-top:3px;overflow-wrap:anywhere}
+.deal-email-people{display:flex;flex-direction:column;gap:1px;margin-top:4px;font-size:11px;color:#77858f;overflow-wrap:anywhere}
+.deal-email-body>p{overflow-wrap:anywhere}
+.deal-email-body>p.collapsed{max-height:12.4em;overflow:hidden;-webkit-mask-image:linear-gradient(#000 70%,transparent);mask-image:linear-gradient(#000 70%,transparent)}
+.deal-email-more,.deal-email-actions button{border:0;background:none;padding:4px 0;color:#3978b1;font-size:11px;cursor:pointer;display:inline-flex;align-items:center;gap:4px}
+.deal-email-files{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.deal-email-files span{display:inline-flex;align-items:center;gap:4px;padding:3px 7px;background:#f3f6f8;border:1px solid #e1e6ea;border-radius:2px;font-size:11px;color:#5a6873;max-width:100%;overflow-wrap:anywhere}
+.deal-email-actions{display:flex;gap:14px;margin-top:6px}
+.deal-email-reply{display:flex;flex-direction:column;gap:7px;margin-top:10px;padding-top:10px;border-top:1px solid #eef0f1}
+.deal-email-reply label{display:flex;align-items:center;gap:8px;font-size:11px;color:#77858f}
+.deal-email-reply label span{width:46px;flex:0 0 46px}
+.deal-email-reply input:not([type=checkbox]){flex:1;min-width:0;height:30px;border:1px solid #cbd2d7;border-radius:2px;padding:4px 8px;font-size:12px;color:#394a57}
+.deal-email-reply-subject{font-size:11px;color:#8a98a3;overflow-wrap:anywhere}
+.deal-email-reply textarea{width:100%;border:1px solid #cbd2d7;border-radius:2px;padding:8px;font-size:12px;line-height:1.5;resize:vertical;color:#394a57}
+.deal-email-reply-actions{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap}
+.deal-email-reply-actions label{margin-right:auto}
+.deal-email-reply-actions>button:not(.blue-btn){border:0;background:none;color:#6c7a85;font-size:11px;display:inline-flex;align-items:center;gap:4px}
+.deal-email-reply-actions .blue-btn{display:inline-flex;align-items:center;gap:6px;min-height:30px}
+/* The deal feed shows plain events as compact lines; letters stay full cards. */
+.deal-detail .timeline-item.deal-email:not(.note-card):not(.task-card){background:#fff;border:1px solid #dadddf;box-shadow:0 1px 2px #0000000a;padding:13px;color:#303a43}
+.deal-detail .timeline-item.deal-email:not(.note-card):not(.task-card) .timeline-icon{display:grid}
+.deal-detail .timeline-item.deal-email:not(.note-card):not(.task-card) small{display:block}
+.deal-detail .timeline-item.deal-email:not(.note-card):not(.task-card) .deal-email-body>p{font-size:12px;margin:6px 0 0;color:#303a43}
