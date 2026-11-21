@@ -36,10 +36,11 @@ async function employeeMap(ctx) {
   return map;
 }
 
-// A phone field can hold several numbers («+7 900 111-22-33, 8 912 000-11-22», moved from amoCRM).
-// Keep the separators and drop everything else, then look for the last 10 digits inside: every
-// number of the list matches, and an extension after the number («… доб. 12») does not get in the way.
-const phoneDigits = column => `regexp_replace(regexp_replace(${column},'[,;/\n]+',',','g'),'[^0-9,]','','g')`;
+// A phone field can hold several numbers («+7 900 111-22-33, 8 912 000-11-22», «Тел. … Сот. …»,
+// moved from amoCRM). Anything but digits and the characters of a written number (space, brackets,
+// plus, dash, dot) separates numbers; then the last 10 digits are looked for inside each one, so an
+// extension after the number («… доб. 12») does not get in the way either.
+const phoneDigits = column => `regexp_replace(regexp_replace(${column},'[^0-9 ()+.-]+',',','g'),'[^0-9,]','','g')`;
 const phoneLike = number => `%${phoneKey(number)}%`;
 
 const canSeeAll = user => user.role === 'admin' || user.deal_access !== 'own';
