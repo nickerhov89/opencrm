@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { createDb } from './db.js';
 import { parseCsv, quoteCsvCell } from './csv.js';
 import { registerIntegrations } from './integrations.js';
-import { registerMail, dealEmails } from './mail.js';
+import { registerMail, dealEmails, secretFilePath } from './mail.js';
 import { createStageRules, RuleError } from './stage-rules.js';
 import { permissionEntities, permissionActions, normalizePermissions, noPermissions, defaultMemberPermissions, securityHeaders, createLoginLimiter, newTotpSecret, verifyTotp, otpauthUrl } from './security.js';
 import {defaultDealCardFields,validDealCardFields} from '../src/deal-card-layout.js';
@@ -977,7 +977,7 @@ function registerPurge(){
   });
 }
 registerIntegrations(app,db,{auth,admin,audit,event,entityEvent,logEntityChanges,logDealChanges,runStageAutomation,customValueError,parseTags,taskSchedule,stageRules});
-registerMail(app,db,{auth,admin,audit,requirePermission,secretFile:resolve(process.env.OPENCRM_SECRET_FILE||resolve(uploadDir,'..','secret.key'))});
+registerMail(app,db,{auth,admin,audit,requirePermission,secretFile:secretFilePath(uploadDir)});
 registerPurge();
 app.use(express.static(resolve(root,'dist')));
 app.get('/{*path}',(req,res) => { if (isApiPath(req.path)) return fail(res,404,'Маршрут не найден'); res.sendFile(resolve(root,'dist/index.html')); });
@@ -985,4 +985,19 @@ app.get('/{*path}',(req,res) => { if (isApiPath(req.path)) return fail(res,404,'
 const badInputCodes=new Set(['22P02','22003','22007','22008','22021','2201X','2201W']);
 app.use((err,_req,res,_next) => { if(badInputCodes.has(err?.code))return fail(res,400,'Проверьте введённые данные'); if(err?.status>=400&&err.status<500)return fail(res,err.status,'Неверный запрос'); console.error(err); fail(res,500,'Ошибка сервера'); });
 if (process.env.NODE_ENV !== 'test') { const port=Number(process.env.PORT)||3001,host=process.env.HOST||'127.0.0.1'; app.listen(port,host,()=>console.log(`OpenCRM: http://${host}:${port}`)); }
+// After a move from amoCRM: with AMO_BASE_URL and AMO_ACCESS_TOKEN set, the card history is loaded from
+// amoCRM once in the background (see syncHistoryFromAmo). A failed run is tried again an hour later.
+if (process.env.NODE_ENV !== 'test' && process.env.AMO_BASE_URL && (process.env.AMO_ACCESS_TOKEN||process.env.AMO_TOKEN)) {
+  const amoHistory=async()=>{
+    try {
+      const {amoClient,syncHistoryFromAmo}=await import('../scripts/amocrm-lib.mjs');
+      const client=amoClient({baseUrl:process.env.AMO_BASE_URL,token:process.env.AMO_ACCESS_TOKEN||process.env.AMO_TOKEN,proxyUrl:process.env.AMO_PROXY_URL||'',minIntervalMs:Math.ceil(1000/Math.min(7,Math.max(0.5,Number(process.env.AMO_RPS)||3))),log:message=>console.log(`amoCRM: ${message.trim()}`)});
+      await syncHistoryFromAmo(db,client);
+    } catch(error) {
+      console.error(`amoCRM: история не загружена: ${error.message}`);
+      if(!/401|403|AMO_BASE_URL/.test(error.message))setTimeout(amoHistory,60*60*1000).unref();
+    }
+  };
+  setTimeout(amoHistory,10000).unref();
+}
 export { app, db };
