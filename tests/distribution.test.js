@@ -69,6 +69,21 @@ test('distribution: new deals from the API go to managers in turn, with the robo
     assert.deepEqual(await owners([manual, old]), [Number(admin), Number(admin)]);
     assert.equal((await db.prepare('SELECT COUNT(*) n FROM deal_distribution_queue').get()).n, 0);
 
+    // Conditions on another field: «Автоаутрич EN» to one manager, any other Автоаутрич to another.
+    const sub = await call('/api/custom-fields', {method: 'POST', body: {entity_type: 'deal', name: 'Подысточник', field_type: 'text'}, status: 201});
+    await call('/api/distribution/rules', {method: 'POST', body: {name: 'EN', pipeline_id: pipeline, sources: ['Автоаутрич'], conditions: [{field_id: 999999, values: ['x']}], user_ids: [mironova], active: true}, status: 400});
+    const en = await call('/api/distribution/rules', {method: 'POST', body: {name: 'Автоаутрич EN', pipeline_id: pipeline, sources: ['Автоаутрич'], conditions: [{field_id: sub.id, values: [' автоаутрич en ']}], user_ids: [mironova], task_title: 'Взять в работу', active: true, sort_order: -2}, status: 201});
+    assert.deepEqual(en.conditions, [{field_id: sub.id, values: ['автоаутрич en']}]);
+    await call(`/api/distribution/rules/${auto.id}`, {method: 'PATCH', body: {user_ids: [Number(admin)], sort_order: -1}});
+    const withSub = async (name, value) => {
+      const id = (await call('/api/v1/deals', {method: 'POST', key, body: {name, pipeline_id: pipeline, owner_id: lebedev, custom_fields: {[field.id]: 'Автоаутрич', ...(value ? {[sub.id]: value} : {})}}, status: 201})).id;
+      return id;
+    };
+    const english = await withSub('EN', 'Автоаутрич EN'), russian = await withSub('RU', 'Автоаутрич RU'), unknown = await withSub('Без подысточника', '');
+    assert.equal(await run(), 3);
+    assert.deepEqual(await owners([english, russian, unknown]), [mironova, Number(admin), Number(admin)], 'EN by the condition, the rest by the default Автоаутрич rule');
+    await call(`/api/distribution/rules/${en.id}`, {method: 'DELETE'});
+
     // A switched-off rule is skipped; a disabled employee is skipped in the turn.
     await call(`/api/distribution/rules/${auto.id}`, {method: 'PATCH', body: {active: false}});
     await db.prepare('UPDATE users SET disabled_at=now_text() WHERE id=?').run(mironova);
