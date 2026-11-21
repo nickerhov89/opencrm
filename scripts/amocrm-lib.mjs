@@ -52,7 +52,7 @@ export function amoClient({baseUrl, token, proxyUrl = '', minIntervalMs = 160, r
   const direct = new Set();
   async function request(path, params = {}) {
     const url = new URL(path, base.origin);
-    for (const [key, value] of Object.entries(params)) url.searchParams.append(key, String(value));
+    for (const [key, value] of Object.entries(params)) for (const item of [].concat(value)) url.searchParams.append(key, String(item));
     for (let attempt = 1; ; attempt++) {
       const wait = last + minIntervalMs - Date.now();
       if (wait > 0) await sleep(wait);
@@ -137,8 +137,12 @@ export const exportPlan = [
   ['notes_leads', '/api/v4/leads/notes', 'notes', {}, 250],
   ['notes_contacts', '/api/v4/contacts/notes', 'notes', {}, 250],
   ['notes_companies', '/api/v4/companies/notes', 'notes', {}, 250],
-  ['events', '/api/v4/events', 'events', {'filter[type]': 'lead_status_changed'}, 100]
+  ['events', '/api/v4/events', 'events', {'filter[type]': 'lead_status_changed'}, 100],
+  // Every event of deals, contacts and companies: the history of the cards (field changes, tags, responsible, links...).
+  ['events_history', '/api/v4/events', 'events', {'filter[entity][]': ['lead', 'contact', 'company']}, 100]
 ];
+// Files added to the export later: an older export without them still loads (without that part).
+const optionalFiles = new Set(['events_history', 'event_types']);
 
 const exists = path => access(path).then(() => true, () => false);
 async function saveJson(path, data) { await writeFile(`${path}.tmp`, JSON.stringify(data)); await rename(`${path}.tmp`, path); }
@@ -159,6 +163,18 @@ export async function exportAccount({client, dir, force = false, log = console.l
     const pipelines = (await client.request('/api/v4/leads/pipelines'))?._embedded?.pipelines || [];
     await saveJson(pipelinesFile, pipelines);
     log(`Воронки: ${pipelines.length}`);
+  }
+  {
+    // Names of event types, used for events the load does not describe itself.
+    const typesFile = join(dir, 'event_types.json');
+    if (force || !await exists(typesFile)) {
+      let types = [];
+      try {
+        const data = await client.request('/api/v4/events/types', {language_code: 'ru'});
+        types = Object.values(data?._embedded || {}).find(Array.isArray) || [];
+      } catch (error) { log(`  типы событий: ${error.message}`); }
+      await saveJson(typesFile, types.map(type => ({key: type.key, lang: type.lang})));
+    }
   }
   for (const [file, path, key, params, limit] of exportPlan) {
     const target = join(dir, `${file}.json`);
@@ -217,7 +233,8 @@ async function exportFiles({client, dir, log}) {
 export async function readDump(dir) {
   const read = async name => JSON.parse(await readFile(join(dir, `${name}.json`), 'utf8'));
   const dump = {account: await read('account'), pipelines: await read('pipelines')};
-  for (const [file] of exportPlan) dump[file] = await read(file);
+  for (const [file] of exportPlan) dump[file] = optionalFiles.has(file) && !await exists(join(dir, `${file}.json`)) ? null : await read(file);
+  dump.event_types = await exists(join(dir, 'event_types.json')) ? await read('event_types') : [];
   dump.files = await exists(join(dir, 'files.json')) ? (await read('files')).map(item => ({...item, path: join(dir, 'files', String(item.note_id))})) : [];
   return dump;
 }
@@ -287,12 +304,81 @@ function noteBody(note) {
   }
 }
 
+// Card history from amoCRM events: one text row per change, in the wording OpenCRM uses for its own
+// history («Поле «X»: было → стало», «Этап изменён: …»). Events that only point at a note (calls,
+// SMS, notes, files) are skipped: the notes themselves are loaded.
+const noteEvents = new Set(['common_note_added', 'attachment_note_added', 'targeting_in_note_added', 'targeting_out_note_added', 'geo_note_added', 'service_note_added', 'site_visit_note_added', 'message_to_cashier_note_added', 'incoming_call', 'outgoing_call', 'incoming_sms', 'outgoing_sms', 'link_followed', 'task_result_added']);
+const fixedEvents = {
+  lead_added: 'Сделка создана', contact_added: 'Контакт создан', company_added: 'Компания создана',
+  lead_deleted: 'Сделка удалена', lead_restored: 'Сделка восстановлена', contact_deleted: 'Контакт удалён', contact_restored: 'Контакт восстановлен', company_deleted: 'Компания удалена', company_restored: 'Компания восстановлена',
+  incoming_chat_message: 'Входящее сообщение в чате', outgoing_chat_message: 'Исходящее сообщение в чате', entity_direct_message: 'Сообщение во внутреннем чате',
+  common_note_deleted: 'Примечание удалено', entity_merged: 'Объединено с дублем', robot_replied: 'Ответ бота', intent_identified: 'Бот определил намерение', transaction_added: 'Добавлена покупка', key_action_completed: 'Ключевое действие выполнено'
+};
+const linkWords = {lead: ['Сделка привязана', 'Сделка отвязана'], contact: ['Контакт привязан', 'Контакт отвязан'], company: ['Компания привязана', 'Компания отвязана'], customer: ['Покупатель привязан', 'Покупатель отвязан']};
+const leaf = value => value === null || value === undefined ? '' : typeof value !== 'object' ? String(value).trim() : Object.values(value).map(leaf).filter(Boolean).join(', ');
+const shown = value => { const text = String(value ?? '').replace(/[\r\n\t]+/g, ' ').trim(); return text ? clip(text, 300) : '—'; };
+
+function historyRows(dump, rows, {uid, dealIds, contactIds, companyIds, warn}) {
+  const targets = {lead: ['deal', dealIds], contact: ['contact', contactIds], company: ['company', companyIds]};
+  const userNames = new Map(dump.users.map(user => [Number(user.id), String(user.name || user.email || `#${user.id}`)]));
+  const pipelineNames = new Map(dump.pipelines.map(p => [Number(p.id), String(p.name || `Воронка ${p.id}`)]));
+  const statusNames = new Map(dump.pipelines.flatMap(p => (p._embedded?.statuses || []).map(s => [`${p.id}:${s.id}`, String(s.name || `Этап ${s.id}`)])));
+  const fieldNames = new Map(['leads', 'contacts', 'companies'].flatMap(entity => (dump[`custom_fields_${entity}`] || []).map(f => [Number(f.id), String(f.name || `Поле ${f.id}`)])));
+  const names = {lead: new Map(dump.leads.map(r => [Number(r.id), r.name])), contact: new Map(dump.contacts.map(r => [Number(r.id), r.name || [r.first_name, r.last_name].filter(Boolean).join(' ')])), company: new Map(dump.companies.map(r => [Number(r.id), r.name]))};
+  const typeNames = new Map((dump.event_types || []).map(type => [type.key, type.lang]));
+  const user = id => Number(id) > 0 ? userNames.get(Number(id)) || `#${id}` : '';
+  const describe = event => {
+    const before = event.value_before || [], after = event.value_after || [];
+    const type = String(event.type || '');
+    if (noteEvents.has(type)) return [];
+    if (fixedEvents[type]) return [fixedEvents[type]];
+    if (type === 'lead_status_changed') {
+      const from = before[0]?.lead_status, to = after[0]?.lead_status;
+      if (!to) return [];
+      const moved = from && Number(from.pipeline_id) !== Number(to.pipeline_id);
+      return [`Этап изменён: ${statusNames.get(`${to.pipeline_id}:${to.id}`) || `Этап ${to.id}`}${moved ? ` · Перенос в воронку «${pipelineNames.get(Number(to.pipeline_id)) || to.pipeline_id}»` : ''}`];
+    }
+    if (type === 'custom_field_value_changed' || /^custom_field_\d+_value_changed$/.test(type)) {
+      const ids = [...new Set([...before, ...after].map(v => v.custom_field_value?.field_id).filter(id => id !== undefined && id !== null))];
+      const text = (list, id) => list.map(v => v.custom_field_value).filter(v => v && v.field_id === id).map(v => leaf(v.text)).filter(Boolean).join(', ');
+      return ids.map(id => `Поле «${fieldNames.get(Number(id)) || `Поле ${id}`}»: ${shown(text(before, id))} → ${shown(text(after, id))}`);
+    }
+    const plainField = {sale_field_changed: 'Бюджет', name_field_changed: 'Название', ltv_field_changed: 'Сумма покупок'}[type];
+    if (plainField) return [`Поле «${plainField}»: ${shown(leaf(before))} → ${shown(leaf(after))}`];
+    if (type === 'entity_responsible_changed') return [`Поле «Ответственный»: ${shown(user(before[0]?.responsible_user?.id))} → ${shown(user(after[0]?.responsible_user?.id))}`];
+    if (type === 'entity_tag_added' || type === 'entity_tag_deleted') {
+      const tags = (type === 'entity_tag_added' ? after : before).map(v => leaf(v.tag?.name)).filter(Boolean).join(', ');
+      return [`${type === 'entity_tag_added' ? 'Теги добавлены' : 'Теги удалены'}: ${tags || '—'}`];
+    }
+    if (/_(un)?linked$/.test(type)) {
+      const unlinked = type.endsWith('_unlinked');
+      const ref = [...after, ...before].map(v => v.link || v.unlink).find(Boolean)?.entity;
+      if (!ref) return [];
+      const name = names[ref.type]?.get(Number(ref.id));
+      return [`${(linkWords[ref.type] || ['Привязана запись', 'Отвязана запись'])[unlinked ? 1 : 0]}: ${name ? clip(String(name), 255) : `#${ref.id}`}`];
+    }
+    if (type === 'nps_rate_added') return [`Оценка NPS: ${leaf(after[0]?.nps?.rate) || '—'}`];
+    return [typeNames.get(type) || type];
+  };
+  const events = [...(dump.events_history || [])].sort((a, b) => a.created_at - b.created_at || String(a.id).localeCompare(String(b.id)));
+  for (const event of events) {
+    const [type, ids] = targets[event.entity_type] || [];
+    if (!type || !ids.has(Number(event.entity_id))) continue;
+    for (const text of describe(event)) {
+      const row = {user_id: uid(event.created_by), event: clip(text, 2000), created_at: toText(event.created_at) ?? toText(Date.now() / 1000), amo_event_id: clip(event.id, 64)};
+      if (type === 'deal') rows.activity.push({deal_id: Number(event.entity_id), ...row});
+      else rows.entity_activity.push({entity_type: type, entity_id: Number(event.entity_id), ...row});
+    }
+  }
+  if (dump.events_history == null && dump.leads.length) warn('В выгрузке нет истории событий (выгрузка сделана старой версией скрипта): запустите export ещё раз');
+}
+
 // Turns an export into table rows. existing = what the target database already has.
 export function transform(dump, existing = {users: [], maxStageId: 0}) {
   const warnings = {};
   const warn = (key, example) => { warnings[key] ??= {count: 0, examples: []}; warnings[key].count++; if (example !== undefined && warnings[key].examples.length < 5) warnings[key].examples.push(example); };
   const zone = safeZone(dump.account?.timezone);
-  const rows = {users: [], pipelines: [], stages: [], custom_fields: [], custom_field_values: [], companies: [], contacts: [], deals: [], deal_contacts: [], tasks: [], notes: [], entity_notes: [], deal_stage_changes: []};
+  const rows = {users: [], pipelines: [], stages: [], custom_fields: [], custom_field_values: [], companies: [], contacts: [], deals: [], deal_contacts: [], tasks: [], notes: [], entity_notes: [], deal_stage_changes: [], activity: [], entity_activity: []};
 
   // Users. An e-mail that already has an account here keeps that account; amoCRM records point at it.
   const userMap = new Map(), byEmail = new Map(existing.users.map(user => [user.email.toLowerCase(), user.id])), takenIds = new Set(existing.users.map(user => user.id)), mergedUsers = [];
@@ -452,6 +538,8 @@ export function transform(dump, existing = {users: [], maxStageId: 0}) {
     }
   }
 
+  historyRows(dump, rows, {uid, dealIds, contactIds, companyIds, warn});
+
   // Files: kept next to the record the note belonged to.
   const files = [];
   const fileTargets = {leads: ['deal', dealIds], contacts: ['contact', contactIds], companies: ['company', companyIds]};
@@ -468,7 +556,7 @@ export function transform(dump, existing = {users: [], maxStageId: 0}) {
 
 // ---------------------------------------------------------------- load
 
-const loadOrder = ['users', 'pipelines', 'stages', 'custom_fields', 'companies', 'contacts', 'deals', 'deal_contacts', 'custom_field_values', 'tasks', 'notes', 'entity_notes', 'deal_stage_changes'];
+const loadOrder = ['users', 'pipelines', 'stages', 'custom_fields', 'companies', 'contacts', 'deals', 'deal_contacts', 'custom_field_values', 'tasks', 'notes', 'entity_notes', 'deal_stage_changes', 'activity', 'entity_activity'];
 const businessTables = ['deals', 'contacts', 'companies', 'tasks', 'custom_fields', 'notes', 'entity_notes', 'attachments'];
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 export const uploadDir = () => resolve(process.env.UPLOAD_DIR || join(projectRoot, 'data/uploads'));
@@ -566,6 +654,8 @@ export async function loadDump(db, dump, {dryRun = false, replace = false, keepD
         droppedPipelines = (await db.query("SELECT p.id FROM pipelines p WHERE p.id <> ALL($1) AND p.name = 'Воронка — новые лиды' AND NOT EXISTS (SELECT 1 FROM deals d JOIN stages s ON s.id=d.stage_id WHERE s.pipeline_id=p.id) AND NOT EXISTS (SELECT 1 FROM inbox_leads l WHERE l.pipeline_id=p.id) AND NOT EXISTS (SELECT 1 FROM lead_forms f WHERE f.pipeline_id=p.id)", [amoPipelines])).rows.map(r => Number(r.id));
         await dropPipelines(db, droppedPipelines);
       }
+      // With the history in the export the server need not load it from amoCRM after start.
+      if (dump.events_history != null) await db.query('INSERT INTO app_settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value', [historySettingKey, JSON.stringify({at: new Date().toISOString(), from: 'export'})]);
       await db.query('SET LOCAL session_replication_role = origin');
       await db.query('SELECT sync_id_sequences()');
       // Consistency check, since foreign keys were not enforced during the load.
@@ -586,5 +676,79 @@ export async function loadDump(db, dump, {dryRun = false, replace = false, keepD
   }
   // Files of records removed by --replace go once the new data is committed.
   if (!dryRun) await Promise.all(replaced.map(name => unlink(resolve(uploads, name)).catch(() => {})));
+  return report;
+}
+
+// Run once by the server after a deploy (server/index.js) when AMO_BASE_URL and AMO_ACCESS_TOKEN are
+// set: downloads the events of deals, contacts and companies straight from amoCRM and writes the card
+// history of the records already loaded here, page by page. Names come from this database and from
+// the small amoCRM lists (users, pipelines, fields). Done once: app_settings remembers it; an
+// interrupted run starts again on the next start (history from amoCRM is replaced, not duplicated).
+export const historySettingKey = 'amocrm_history_loaded';
+export async function syncHistoryFromAmo(db, client, {log = console.log} = {}) {
+  if ((await db.query('SELECT value FROM app_settings WHERE key=$1', [historySettingKey])).rows.length) return null;
+  const all = async (sql) => (await db.query(sql)).rows.map(r => ({...r, id: Number(r.id)}));
+  const [deals, contacts, companies, users] = [await all('SELECT id,name FROM deals'), await all('SELECT id,name FROM contacts'), await all('SELECT id,name FROM companies'), await all('SELECT id,email FROM users')];
+  if (!deals.length && !contacts.length && !companies.length) { log('amoCRM: в CRM нет записей, история не нужна'); return null; }
+  const list = async (path, key, params = {}, limit = 250) => client.list(path, key, params, limit);
+  const amoUsers = await list('/api/v4/users', 'users');
+  const pipelines = (await client.request('/api/v4/leads/pipelines'))?._embedded?.pipelines || [];
+  const dump = {users: amoUsers, pipelines, leads: deals, contacts, companies, event_types: []};
+  for (const entity of ['leads', 'contacts', 'companies']) dump[`custom_fields_${entity}`] = await list(`/api/v4/${entity}/custom_fields`, 'custom_fields', {}, 50);
+  try { dump.event_types = Object.values((await client.request('/api/v4/events/types', {language_code: 'ru'}))?._embedded || {}).find(Array.isArray) || []; } catch (error) { log(`amoCRM: типы событий: ${error.message}`); }
+  // An amoCRM employee is the account here with the same e-mail, or the account with the amoCRM ID.
+  const byEmail = new Map(users.map(u => [String(u.email).toLowerCase(), u.id])), userIds = new Set(users.map(u => u.id));
+  const userMap = new Map(amoUsers.map(u => [Number(u.id), byEmail.get(String(u.email || '').trim().toLowerCase()) ?? (userIds.has(Number(u.id)) ? Number(u.id) : null)]));
+  const ids = {uid: id => userMap.get(Number(id)) ?? null, dealIds: new Set(deals.map(r => r.id)), contactIds: new Set(contacts.map(r => r.id)), companyIds: new Set(companies.map(r => r.id)), warn: () => {}};
+  const affected = result => Number(result.rowCount ?? result.affectedRows ?? 0);
+  const replaced = affected(await db.query('DELETE FROM activity WHERE amo_event_id IS NOT NULL')) + affected(await db.query('DELETE FROM entity_activity WHERE amo_event_id IS NOT NULL'));
+  log(`amoCRM: загрузка истории карточек${replaced ? ` (заменяется загруженная раньше: ${replaced})` : ''}`);
+  const counts = {events: 0, activity: 0, entity_activity: 0};
+  let lastLog = Date.now();
+  for (let page = 1; ; page++) {
+    const data = await client.request('/api/v4/events', {'filter[entity][]': ['lead', 'contact', 'company'], limit: 100, page});
+    const events = data?._embedded?.events || [];
+    const rows = {activity: [], entity_activity: []};
+    historyRows({...dump, events_history: events}, rows, ids);
+    await insertRows(db, 'activity', rows.activity);
+    await insertRows(db, 'entity_activity', rows.entity_activity);
+    counts.events += events.length; counts.activity += rows.activity.length; counts.entity_activity += rows.entity_activity.length;
+    if (Date.now() - lastLog > 30000) { lastLog = Date.now(); log(`amoCRM: событий ${counts.events}, записей истории ${counts.activity + counts.entity_activity}`); }
+    if (!events.length || !data._links?.next) break;
+  }
+  await db.query('INSERT INTO app_settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value', [historySettingKey, JSON.stringify({at: new Date().toISOString(), ...counts})]);
+  log(`amoCRM: история загружена — событий ${counts.events}, в сделках ${counts.activity}, в контактах и компаниях ${counts.entity_activity}`);
+  return counts;
+}
+
+// Adds the card history of an export to a CRM where the export is already loaded, without touching
+// anything else. History loaded from amoCRM earlier (rows with amo_event_id) is replaced; history
+// written in OpenCRM stays. Records missing here are skipped.
+export async function loadHistory(db, dump, {dryRun = false, log = console.log} = {}) {
+  let report;
+  try {
+    await db.transaction(async () => {
+      await db.query('SET LOCAL session_replication_role = replica');
+      const users = (await db.query('SELECT id,email FROM users')).rows.map(u => ({id: Number(u.id), email: u.email}));
+      const userIds = new Set(users.map(u => u.id));
+      const {rows, warnings} = transform(dump, {users, maxStageId: await count(db, 'SELECT COALESCE(MAX(id),0) n FROM stages')});
+      const present = async (table, ids) => new Set((await db.query(`SELECT id FROM ${table} WHERE id = ANY($1)`, [[...new Set(ids)]])).rows.map(r => Number(r.id)));
+      const deals = await present('deals', rows.activity.map(r => r.deal_id));
+      const entities = {contact: await present('contacts', rows.entity_activity.filter(r => r.entity_type === 'contact').map(r => r.entity_id)), company: await present('companies', rows.entity_activity.filter(r => r.entity_type === 'company').map(r => r.entity_id))};
+      const person = row => ({...row, user_id: userIds.has(row.user_id) ? row.user_id : null});
+      const activity = rows.activity.filter(r => deals.has(r.deal_id)).map(person);
+      const entityActivity = rows.entity_activity.filter(r => entities[r.entity_type].has(r.entity_id)).map(person);
+      const affected = result => Number(result.rowCount ?? result.affectedRows ?? 0);
+      const removed = {activity: affected(await db.query('DELETE FROM activity WHERE amo_event_id IS NOT NULL')), entity_activity: affected(await db.query('DELETE FROM entity_activity WHERE amo_event_id IS NOT NULL'))};
+      await insertRows(db, 'activity', activity); log(`  activity: ${activity.length}`);
+      await insertRows(db, 'entity_activity', entityActivity); log(`  entity_activity: ${entityActivity.length}`);
+      await db.query('INSERT INTO app_settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value', [historySettingKey, JSON.stringify({at: new Date().toISOString(), from: 'export'})]);
+      await db.query('SET LOCAL session_replication_role = origin');
+      await db.query('SELECT sync_id_sequences()');
+      const historyWarnings = Object.fromEntries(Object.entries(warnings).filter(([text]) => /истори/i.test(text)));
+      report = {dry_run: dryRun, counts: {activity: activity.length, entity_activity: entityActivity.length}, replaced: removed, skipped: {activity: rows.activity.length - activity.length, entity_activity: rows.entity_activity.length - entityActivity.length}, warnings: historyWarnings};
+      if (dryRun) throw new DryRun();
+    })();
+  } catch (error) { if (!(error instanceof DryRun)) throw error; }
   return report;
 }

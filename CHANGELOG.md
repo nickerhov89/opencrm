@@ -9,6 +9,7 @@
 
 ## Unreleased — closer to amoCRM
 
+- The desktop opens on «Сегодня»; board cards show how many days the earliest open task is overdue («3 дн.»).
 - Distribution of new deals (Settings → Распределение, like the amoCRM widget): rules by pipeline, source and origin (API, accepted requests, created by hand) give new deals to managers in turn a few seconds after creation; the manager becomes the owner of the deal, its main contact, its company and its open tasks, then the rule's task («Связаться: Взять в работу», due at the end of the day) is created for them. Deals loaded with an old date are never redistributed. API: `/api/distribution/rules`.
 - Mail sync links letters to deals through an address index built once per run: a letter takes milliseconds instead of a scan of every deal (about 18 s per letter on 7500 deals).
 - `deals.source` mirrors the deal custom field «Источник» on every write (interface, API, import) without moving `updated_at` or sending `deal.updated`; deals loaded before are filled on start. The deal card hides the built-in «Источник» when the field exists.
@@ -31,6 +32,7 @@
 
 ## Unreleased — data for reports and the amoCRM move
 
+- The amoCRM import brings the card history: all events of deals, contacts and companies (field changes, tags, responsible, links, stages) become history rows worded like OpenCRM's own; `history` adds it to a CRM loaded earlier without touching anything else, and with `AMO_BASE_URL` and `AMO_ACCESS_TOKEN` in `.env` the server does this by itself once after start, straight from amoCRM. Deal, contact and company history is ordered by time and shows up to 500 rows; the deal feed also shows the history of its contacts and company, as amoCRM does.
 - Notes have `note_type` (`common` for notes written here, the amoCRM type for loaded ones) in the API, the `note_type` filter and the `note.created` webhook. The amoCRM import downloads files directly when the proxy refuses a host.
 - `scripts/amocrm-import.mjs`: one-time move from amoCRM. `export` downloads the account through the amoCRM API v4 (proxy, rate limit, retries, resumable), `load` writes it in one transaction keeping amoCRM IDs, with per-pipeline won/lost stages, stage history, tasks, notes, files and custom fields; an existing account with an amoCRM e-mail takes the amoCRM user ID; `--dry-run` rolls back after the checks, `--replace` loads again. See docs/AMOCRM_IMPORT.md.
 - Tasks have a `description` (up to 5000 characters) next to the 500-character title, in the task window, the deal timeline, the task board and the API.
