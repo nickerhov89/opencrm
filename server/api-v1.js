@@ -5,8 +5,9 @@
 import {createHash} from 'node:crypto';
 import {RuleError} from './stage-rules.js';
 import {taskTypes} from '../src/task-types.js';
+import {emailSelect, emailView} from './mail.js';
 
-export const apiScopes = ['leads:write', 'deals:read', 'deals:write', 'contacts:read', 'contacts:write', 'companies:read', 'companies:write', 'tasks:read', 'tasks:write', 'users:read', 'pipelines:write', 'fields:write'];
+export const apiScopes = ['leads:write', 'deals:read', 'deals:write', 'contacts:read', 'contacts:write', 'companies:read', 'companies:write', 'tasks:read', 'tasks:write', 'users:read', 'pipelines:write', 'fields:write', 'emails:read'];
 
 export class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -593,6 +594,25 @@ export function registerApiV1(app, db, helpers) {
     const id = positiveId(req.params.id);
     await liveRow('deals', id);
     res.json({items: await db.prepare('SELECT id,kind,direction,subject,body,user_id,created_at FROM deal_communications WHERE deal_id=? ORDER BY id DESC LIMIT 500').all(id)});
+  }));
+  // Letters from connected mailboxes linked to the deal, oldest first.
+  app.get('/api/v1/deals/:id/emails', apiKey('emails:read'), route(async (req, res) => {
+    const id = positiveId(req.params.id);
+    await liveRow('deals', id);
+    res.json({items: (await db.prepare(`${emailSelect} WHERE e.deal_id=? ORDER BY e.sent_at,e.id LIMIT 1000`).all(id)).map(row => emailView(row))});
+  }));
+  // Every stored letter, including the ones not linked to a deal (linked=0).
+  app.get('/api/v1/emails', apiKey('emails:read'), route(async (req, res) => {
+    const where = ['1=1'], params = [];
+    const deal = queryId(req, 'deal_id'), mailbox = queryId(req, 'mailbox_id'), messageId = queryText(req, 'message_id', 500), created = timestamp(req.query.created_since, 'created_since');
+    const linked = req.query.linked == null ? '' : String(req.query.linked);
+    if (!['', '0', '1'].includes(linked)) bad('linked: 1 или 0');
+    if (deal) { where.push('e.deal_id=?'); params.push(deal); }
+    if (mailbox) { where.push('e.mailbox_id=?'); params.push(mailbox); }
+    if (messageId) { where.push('(e.message_id=? OR e.in_reply_to=?)'); params.push(messageId, messageId); }
+    if (created) { where.push('e.created_at>=?'); params.push(created); }
+    if (linked) where.push(linked === '1' ? 'e.deal_id IS NOT NULL' : 'e.deal_id IS NULL');
+    await listPage(req, res, {sql: `${emailSelect} WHERE ${where.join(' AND ')}`, params, alias: 'e'}, async items => items.map(row => emailView(row)));
   }));
   app.post('/api/v1/deals/:id/communications', apiKey('deals:write'), route(async (req, res) => {
     const id = positiveId(req.params.id), body = objectBody(req);
