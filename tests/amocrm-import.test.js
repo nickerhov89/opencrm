@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {amoClient, exportAccount, readDump, loadDump} from '../scripts/amocrm-lib.mjs';
+import {amoClient, exportAccount, readDump, loadDump, loadHistory} from '../scripts/amocrm-lib.mjs';
 
 // 2025-03-10 09:00 UTC and friends.
 const t = (iso) => Math.floor(Date.parse(iso) / 1000);
@@ -78,6 +78,22 @@ function fixture() {
       {id: 'e2', type: 'lead_status_changed', entity_id: 21000001, created_by: 9001, created_at: t('2025-04-01T08:00:00Z'), value_before: [{lead_status: {id: 5002, pipeline_id: 7001}}], value_after: [{lead_status: {id: 142, pipeline_id: 7001}}]},
       {id: 'e3', type: 'lead_status_changed', entity_id: 21000002, created_by: 9003, created_at: t('2025-05-20T09:00:00Z'), value_before: [{lead_status: {id: 5101, pipeline_id: 7002}}], value_after: [{lead_status: {id: 143, pipeline_id: 7002}}]},
       {id: 'e4', type: 'lead_status_changed', entity_id: 77777, created_by: 9003, created_at: t('2025-05-20T09:00:00Z'), value_before: [], value_after: [{lead_status: {id: 5101, pipeline_id: 7002}}]}
+    ],
+    event_types: [{key: 'some_new_event', lang: 'Новое событие'}],
+    events_history: [
+      {id: 'h13', type: 'lead_status_changed', entity_type: 'lead', entity_id: 21000001, created_by: 9001, created_at: t('2025-04-01T08:00:00Z'), value_before: [{lead_status: {id: 5002, pipeline_id: 7001}}], value_after: [{lead_status: {id: 142, pipeline_id: 7001}}]},
+      {id: 'h1', type: 'lead_added', entity_type: 'lead', entity_id: 21000001, created_by: 9001, created_at: t('2025-03-10T09:00:00Z'), value_before: [], value_after: [{note: {id: 1}}]},
+      {id: 'h2', type: 'custom_field_value_changed', entity_type: 'lead', entity_id: 21000001, created_by: 0, created_at: t('2025-03-10T09:01:00Z'), value_before: [], value_after: [{custom_field_value: {field_id: 399447, field_type: 1, enum_id: null, text: 'yandex'}}]},
+      {id: 'h3', type: 'entity_tag_added', entity_type: 'lead', entity_id: 21000001, created_by: 0, created_at: t('2025-03-10T09:02:00Z'), value_before: [], value_after: [{tag: {name: 'сайт'}}, {tag: {name: 'a,b'}}]},
+      {id: 'h4', type: 'lead_status_changed', entity_type: 'lead', entity_id: 21000001, created_by: 9001, created_at: t('2025-03-11T09:00:00Z'), value_before: [{lead_status: {id: 5001, pipeline_id: 7001}}], value_after: [{lead_status: {id: 5002, pipeline_id: 7001}}]},
+      {id: 'h5', type: 'entity_responsible_changed', entity_type: 'lead', entity_id: 21000001, created_by: 9001, created_at: t('2025-03-11T09:05:00Z'), value_before: [{responsible_user: {id: 9002}}], value_after: [{responsible_user: {id: 9001}}]},
+      {id: 'h6', type: 'sale_field_changed', entity_type: 'lead', entity_id: 21000001, created_by: 9001, created_at: t('2025-03-11T09:06:00Z'), value_before: [{sale_field_value: {sale: 0}}], value_after: [{sale_field_value: {sale: 150000}}]},
+      {id: 'h7', type: 'contact_linked', entity_type: 'lead', entity_id: 21000001, created_by: 9001, created_at: t('2025-03-11T09:07:00Z'), value_before: [], value_after: [{link: {entity: {type: 'contact', id: 4001}}}]},
+      {id: 'h8', type: 'common_note_added', entity_type: 'lead', entity_id: 21000001, created_by: 9001, created_at: t('2025-03-11T09:00:00Z'), value_before: [], value_after: [{note: {id: 81000001}}]},
+      {id: 'h9', type: 'custom_field_value_changed', entity_type: 'contact', entity_id: 4001, created_by: 0, created_at: t('2024-01-05T10:06:00Z'), value_before: [], value_after: [{custom_field_value: {field_id: 101, field_type: 8, enum_id: 1, text: 'Ivan@Romashka.test'}}]},
+      {id: 'h10', type: 'contact_added', entity_type: 'contact', entity_id: 4001, created_by: 9002, created_at: t('2024-01-05T10:05:00Z'), value_before: [], value_after: [{note: {id: 2}}]},
+      {id: 'h11', type: 'lead_added', entity_type: 'lead', entity_id: 99, created_by: 9001, created_at: t('2025-03-10T09:00:00Z'), value_before: [], value_after: []},
+      {id: 'h12', type: 'some_new_event', entity_type: 'lead', entity_id: 21000001, created_by: 0, created_at: t('2025-03-12T09:00:00Z'), value_before: [], value_after: []}
     ]
   };
 }
@@ -114,6 +130,8 @@ test('amoCRM client pages through lists, retries and exports to files', async ()
   assert.ok(calls.includes('/download/u2/v2/b.txt'), 'without a download link the known Drive path is tried');
   assert.ok(calls.includes('/api/v4/leads?with=contacts%2Closs_reason&limit=250&page=2'));
   assert.ok(calls.some(c => c.startsWith('/api/v4/events?filter%5Btype%5D=lead_status_changed&limit=100')));
+  assert.ok(calls.some(c => c.startsWith('/api/v4/events?filter%5Bentity%5D%5B%5D=lead&filter%5Bentity%5D%5B%5D=contact&filter%5Bentity%5D%5B%5D=company&limit=100')), 'the whole card history is exported');
+  assert.ok(calls.includes('/api/v4/events/types?language_code=ru'));
   const dump = await readDump(dir);
   assert.deepEqual(dump.leads.map(l => l.id), [1, 2, 3]);
   assert.deepEqual(dump.files.map(f => [f.note_id, f.name, f.mime_type, f.size, !!f.error]), [[5, 'Смета.pdf', 'application/pdf', 6, false], [6, 'b.txt', undefined, undefined, true]]);
@@ -170,7 +188,7 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
     assert.equal(Number((await one('SELECT COUNT(*) n FROM pipelines WHERE id=7001')).n), 0);
 
     const report = await loadDump(db, withFiles(), {log: quiet});
-    assert.deepEqual(report.counts, {users: 2, pipelines: 2, stages: 9, custom_fields: 8, companies: 1, contacts: 2, deals: 3, deal_contacts: 3, custom_field_values: 9, tasks: 3, notes: 5, entity_notes: 2, deal_stage_changes: 6, attachments: 1});
+    assert.deepEqual(report.counts, {users: 2, pipelines: 2, stages: 9, custom_fields: 8, companies: 1, contacts: 2, deals: 3, deal_contacts: 3, custom_field_values: 9, tasks: 3, notes: 5, entity_notes: 2, deal_stage_changes: 6, activity: 9, entity_activity: 2, attachments: 1});
     assert.deepEqual(report.rekeyed_users, [{email: 'admin@example.test', from: admin.id, to: 9003}]);
     assert.deepEqual(report.merged_users, []);
     assert.equal(Number((await one('SELECT COUNT(*) n FROM users WHERE email=$1', 'admin@example.test')).n), 1);
@@ -286,6 +304,36 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
     ]);
     const changes = await call('/v1/stage-changes?deal_id=21000001', {key});
     assert.equal(changes.items.length, 3);
+
+    // Card history from amoCRM events, in the wording of OpenCRM's own history.
+    const expectedHistory = [
+      ['2025-03-10 09:00:00', 'Анна', 'Сделка создана'],
+      ['2025-03-10 09:01:00', null, 'Поле «utm_source»: — → yandex'],
+      ['2025-03-10 09:02:00', null, 'Теги добавлены: сайт, a,b'],
+      ['2025-03-11 09:00:00', 'Анна', 'Этап изменён: Квалификация'],
+      ['2025-03-11 09:05:00', 'Анна', 'Поле «Ответственный»: Борис → Анна'],
+      ['2025-03-11 09:06:00', 'Анна', 'Поле «Бюджет»: 0 → 150000'],
+      ['2025-03-11 09:07:00', 'Анна', 'Контакт привязан: Иван Петров'],
+      ['2025-03-12 09:00:00', null, 'Новое событие'],
+      ['2025-04-01 08:00:00', 'Анна', 'Этап изменён: Успешно']
+    ];
+    const card = await call('/deals/21000001');
+    assert.deepEqual(card.activity.map(a => [a.created_at, a.author, a.event]).reverse(), expectedHistory);
+    assert.equal(card.stage_since, '2025-04-01 08:00:00', 'time in stage counts from the last stage change');
+    assert.ok(JSON.stringify(await call('/contacts/4001')).includes('Поле «Email»: — → Ivan@Romashka.test'), 'contact history is shown on the contact');
+    assert.deepEqual((await db.query("SELECT event FROM entity_activity WHERE entity_type='contact' AND entity_id=4001 ORDER BY created_at")).rows.map(r => r.event), ['Контакт создан', 'Поле «Email»: — → Ivan@Romashka.test']);
+
+    // The history alone can be loaded again into the loaded CRM: amoCRM rows are replaced, history written here stays.
+    await db.query("INSERT INTO activity (deal_id,user_id,event,created_at) VALUES (21000001,9001,'Написано в OpenCRM','2025-03-20 10:00:00')");
+    const historyDry = await loadHistory(db, fixture(), {dryRun: true, log: quiet});
+    assert.deepEqual(historyDry.counts, {activity: 9, entity_activity: 2});
+    const historyReport = await loadHistory(db, fixture(), {log: quiet});
+    assert.deepEqual(historyReport.replaced, {activity: 9, entity_activity: 2});
+    assert.deepEqual(historyReport.skipped, {activity: 0, entity_activity: 0});
+    const after = (await call('/deals/21000001')).activity.map(a => a.event);
+    assert.equal(after.length, 10);
+    assert.ok(after.includes('Написано в OpenCRM'));
+    assert.equal(Number((await one('SELECT COUNT(*) n FROM webhook_events')).n), 0, 'the history load sends no webhooks');
 
     // Triggers were off: no webhooks for loaded rows, timestamps kept.
     assert.equal(Number((await one('SELECT COUNT(*) n FROM webhook_events')).n), 0);

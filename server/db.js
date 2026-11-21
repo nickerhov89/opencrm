@@ -357,6 +357,9 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
 -- Where a note came from: 'common' is written by a person; loads from amoCRM keep its note types (call_in, amomail_message, ...).
 ALTER TABLE notes ADD COLUMN IF NOT EXISTS note_type TEXT NOT NULL DEFAULT 'common';
 ALTER TABLE entity_notes ADD COLUMN IF NOT EXISTS note_type TEXT NOT NULL DEFAULT 'common';
+-- History loaded from amoCRM keeps the event ID, so a repeated history load replaces it and leaves history written here alone.
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS amo_event_id TEXT;
+ALTER TABLE entity_activity ADD COLUMN IF NOT EXISTS amo_event_id TEXT;
 CREATE OR REPLACE FUNCTION normalize_telegram(value text) RETURNS text LANGUAGE sql IMMUTABLE AS $$
   SELECT lower(regexp_replace(btrim(COALESCE(value, '')), '^(https?://)?(www[.])?((t|telegram)[.]me/)?@?', ''))
 $$;
