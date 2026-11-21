@@ -2,7 +2,10 @@
 // data on request (nothing is stored except when the panel was last opened).
 //   - overdue tasks and tasks due within the hour (own tasks);
 //   - unread incoming letters of the employee's deals (admins: of all deals and unlinked ones);
-//   - new requests in «Неразобранное» (who may create deals).
+//   - new requests in «Неразобранное» (who may create deals);
+//   - unread «Чат» messages from colleagues (30 days), until the deal is opened.
+import {unreadChat} from './team-chat.js';
+
 const iso = date => date.toISOString();
 
 export function registerNotifications(app, db, {auth}) {
@@ -19,6 +22,8 @@ export function registerNotifications(app, db, {auth}) {
     const letters = await db.prepare(`SELECT e.id,e.subject,e.from_address,e.from_name,e.body,e.sent_at,e.deal_id,d.name deal_name FROM emails e LEFT JOIN deals d ON d.id=e.deal_id
       WHERE e.direction='incoming' AND e.read_at IS NULL AND e.sent_at>=? AND ${scope} ORDER BY e.sent_at DESC LIMIT 100`).all(iso(week).slice(0, 19).replace('T', ' '), ...(admin ? [] : [user.id]));
     for (const letter of letters) items.push({id: `email:${letter.id}`, kind: 'email', title: letter.subject || 'Без темы', text: `От: ${letter.from_name ? `${letter.from_name} <${letter.from_address}>` : letter.from_address}`, subtitle: [letter.deal_name, letter.body.replace(/\s+/g, ' ').slice(0, 120)].filter(Boolean).join(' · '), at: letter.sent_at, deal_id: letter.deal_id, email_id: letter.id});
+    for (const message of await unreadChat(db, user.id, iso(new Date(now.getTime() - 30 * 864e5)).slice(0, 19).replace('T', ' ')))
+      items.push({id: `chat:${message.id}`, kind: 'chat', title: `Чат: ${message.deal_name}`, text: `${message.author || 'Сотрудник'}: ${message.body.replace(/\s+/g, ' ').slice(0, 160)}`, subtitle: '', at: message.created_at, deal_id: message.deal_id});
     if (admin || user.permissions?.deal?.create === true) {
       const leads = await db.prepare("SELECT id,title,contact_name,company_name,phone,email,created_at FROM inbox_leads WHERE status='pending' AND created_at>=? ORDER BY id DESC LIMIT 50").all(iso(week).slice(0, 19).replace('T', ' '));
       for (const lead of leads) items.push({id: `lead:${lead.id}`, kind: 'lead', title: 'Новая заявка', text: lead.title, subtitle: [lead.contact_name, lead.company_name, lead.phone, lead.email].filter(Boolean).join(', '), at: lead.created_at, lead_id: lead.id});

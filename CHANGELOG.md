@@ -20,6 +20,8 @@
 
 ## Unreleased — closer to amoCRM
 
+- «Чат» in a deal: employees write to each other about the deal (to one or several colleagues or to everyone who can open it). The message is in the deal feed with who has read it and in the recipients' «Сообщения» until they open the deal.
+- The deal board scrolls sideways when you press the mouse on an empty spot and drag, as in amoCRM.
 - Analytics → **Звонки**: incoming and outgoing calls of each employee with their length (by count or by duration), the average and the total, and the latest calls with links to the deal, contact or company and the recording. Counts calls loaded from amoCRM, calls recorded in the deal feed and calls of the Mango Office plugin, each once.
 - Analytics → **Цели**: a monthly goal per employee by budget and by number of won deals, with progress from won deals closed that month (administrators set them in **Настройки целей**).
 - Letter templates (Settings → Почта → **Шаблоны писем**): «Новое письмо» and the letter from a deal fill the subject and the text from a template.
