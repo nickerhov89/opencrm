@@ -9,6 +9,9 @@ const time=date=>date.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit
 const money=amount=>new Intl.NumberFormat('ru-RU').format(Number(amount)||0)+' ₽';
 const taskNoun=count=>count%10===1&&count%100!==11?'открытая задача':count%10>=2&&count%10<=4&&(count%100<12||count%100>14)?'открытые задачи':'открытых задач';
 
+// Deals moved from amoCRM keep the source in the custom field «Источник»; the card shows it when the built-in one is empty.
+const sourceField=(customFields,values)=>{const field=customFields.find(item=>item.entity_type==='deal'&&/^источник/i.test(String(item.name).trim()));return field?String(values[field.id]||'').trim():''};
+
 function updatedLabel(value){
   const date=parseStamp(value),today=new Date();if(!date||!Number.isFinite(date.getTime()))return '';
   const yesterday=new Date(today);yesterday.setDate(yesterday.getDate()-1);
@@ -32,8 +35,8 @@ export default function DealCard({deal,onOpen,onDragStart,onDragEnd,dragging=fal
     if(key==='client')return <span className="card-client" title={caption}>{showAvatar&&<i className="card-client-avatar" aria-hidden="true">{person.trim().slice(0,1).toLocaleUpperCase('ru-RU')}</i>}<span className="card-client-label">{caption}</span>{deal.contact_count>1&&<em>+{deal.contact_count-1}</em>}</span>;
     if(key==='updated')return <small className="card-updated">{updatedLabel(deal.updated_at)}</small>;
     if(key==='owner')return <span className="card-owner-name">{deal.owner_name||'Без ответственного'}</span>;
-    if(key==='amount')return <b className="card-amount">{money(deal.amount)}</b>;
-    if(key==='source')return <span className="card-source">{deal.source||'Без источника'}</span>;
+    if(key==='amount')return Number(deal.amount)>0?<b className="card-amount">{money(deal.amount)}</b>:null;
+    if(key==='source'){const value=deal.source||sourceField(customFields,customValues);return value?<span className="card-source">{value}</span>:null}
     if(key==='tags')return <span className="card-tags">{tags.slice(0,2).map(tag=><span className="card-tag" key={tag}>{tag}</span>)}{tags.length>2&&<span className="card-extra-tags">+{tags.length-2}</span>}{!tags.length&&'Без тегов'}</span>;
     if(key==='task')return status?<span className={'card-task-status '+status.kind} title={`${deal.open_tasks_count} ${taskNoun(deal.open_tasks_count)}${deal.overdue_tasks_count?`, просрочено: ${deal.overdue_tasks_count}`:''}`}><i/>{status.label}</span>:<span className="card-no-task">Нет задач</span>;
     if(key==='last_communication')return deal.last_communication_text?<span className="card-last-communication" title={deal.last_communication_text}><small>{({call:'Звонок',email:'Письмо',message:'Сообщение'})[deal.last_communication_kind]||'Контакт'}:</small> {deal.last_communication_text}</span>:null;
