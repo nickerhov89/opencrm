@@ -54,6 +54,7 @@ test('reports: calls by employee, monthly goals, letter templates', async () => 
     assert.equal(byName['Без сотрудника'].incoming, 1, 'a missed call nobody answered');
     assert.equal(report.people.at(-1).name, 'Без сотрудника');
     assert.deepEqual(report.total, {incoming: 3, outgoing: 3, seconds: 300});
+    assert.deepEqual(report.average, {incoming: 1, outgoing: 1, seconds: 100}, 'over three rows, the one without an employee included');
     assert.equal(report.recent.length, 6);
     assert.equal(report.recent[0].result, '', 'the call recorded today is the latest');
     assert.deepEqual(report.recent.find(row => row.key === 'me2').target, {kind: 'phone', id: null, name: '79005556677'});
