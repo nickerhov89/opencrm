@@ -1,0 +1,21 @@
+{
+  "id": "mango-office",
+  "name": "Mango Office",
+  "version": "1.0.0",
+  "api": 1,
+  "description": "Звонки Mango Office: входящие с новых номеров попадают в «Неразобранное», все звонки — в ленту сделки и контакта, записи разговоров слушаются в карточке.",
+  "author": "OpenCRM",
+  "server": "server.js",
+  "client": "client/index.js",
+  "settings": [
+    {"key": "api_key", "label": "Уникальный код АТС (vpbx_api_key)", "type": "text", "required": true, "help": "Личный кабинет Mango Office → Интеграции → API → «Уникальный код вашей АТС»."},
+    {"key": "api_salt", "label": "Ключ для создания подписи (salt)", "type": "password", "required": true, "help": "Там же: «Ключ для создания подписи». Нужен, чтобы проверять события и скачивать записи."},
+    {"key": "employees", "label": "Сотрудники: внутренний номер = e-mail", "type": "textarea", "help": "По одному на строку, например: 101 = anna@company.ru. Так звонок записывается от имени сотрудника."},
+    {"key": "create_leads", "label": "Входящие с незнакомых номеров — в «Неразобранное»", "type": "boolean", "default": true},
+    {"key": "pipeline_id", "label": "ID воронки для заявок", "type": "number", "help": "Пусто — первая воронка."},
+    {"key": "api_url", "label": "Адрес API Mango Office", "type": "text", "default": "https://app.mango-office.ru/vpbx", "help": "Менять не нужно."}
+  ],
+  "endpoints": [
+    {"path": "/mango", "label": "Адрес внешней системы для Mango Office"}
+  ]
+}
