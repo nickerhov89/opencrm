@@ -49,6 +49,7 @@ export function amoClient({baseUrl, token, proxyUrl = '', minIntervalMs = 160, r
   const base = new URL(baseUrl);
   if (base.protocol !== 'https:') throw new Error('AMO_BASE_URL должен начинаться с https://');
   let last = 0;
+  const direct = new Set();
   async function request(path, params = {}) {
     const url = new URL(path, base.origin);
     for (const [key, value] of Object.entries(params)) url.searchParams.append(key, String(value));
@@ -57,8 +58,17 @@ export function amoClient({baseUrl, token, proxyUrl = '', minIntervalMs = 160, r
       if (wait > 0) await sleep(wait);
       last = Date.now();
       let response;
-      try { response = await get(url.href, {Authorization: `Bearer ${token}`, Accept: 'application/json', 'User-Agent': 'opencrm-import'}, proxyUrl); }
-      catch (error) {
+      const headers = {Authorization: `Bearer ${token}`, Accept: 'application/json', 'User-Agent': 'opencrm-import'};
+      try {
+        try { response = await get(url.href, headers, direct.has(url.hostname) ? '' : proxyUrl); }
+        catch (error) {
+          // A proxy may refuse some amoCRM hosts: those are then reached directly.
+          if (!proxyUrl || direct.has(url.hostname) || !/^proxy CONNECT/.test(error.message)) throw error;
+          direct.add(url.hostname);
+          log(`  ${url.hostname}: прокси не пускает, запросы напрямую`);
+          response = await get(url.href, headers, '');
+        }
+      } catch (error) {
         if (attempt >= retries) throw new Error(`${url.pathname}: ${error.message}`);
         log(`  сеть: ${error.message}, повтор ${attempt}`);
         await sleep(Math.min(30000, 1000 * 2 ** (attempt - 1)));
@@ -76,17 +86,24 @@ export function amoClient({baseUrl, token, proxyUrl = '', minIntervalMs = 160, r
       return JSON.parse(response.body);
     }
   }
-  // Binary GET (files on amoCRM Drive). Redirects are followed; the token goes to amoCRM hosts only.
+  // Binary GET (files on amoCRM Drive and the storage it redirects to). Redirects are followed; the
+  // token goes to amoCRM hosts only. Files go directly first (proxies often allow only the API
+  // hosts); after a network error the next attempt switches between direct and proxy.
   async function download(url) {
     const trusted = host => host === base.hostname || /(^|\.)(amocrm\.(ru|com)|kommo\.com)$/i.test(host);
-    for (let hop = 0, attempt = 1; hop < 6;) {
+    for (let hop = 0, attempt = 1, viaProxy = false; hop < 6;) {
       const target = new URL(url);
       const wait = last + minIntervalMs - Date.now();
       if (wait > 0) await sleep(wait);
       last = Date.now();
       let response;
-      try { response = await get(target.href, {...(trusted(target.hostname) ? {Authorization: `Bearer ${token}`} : {}), 'User-Agent': 'opencrm-import'}, proxyUrl, 300000); }
-      catch (error) { if (attempt++ >= retries) throw error; await sleep(Math.min(30000, 1000 * 2 ** attempt)); continue; }
+      try { response = await get(target.href, {...(trusted(target.hostname) ? {Authorization: `Bearer ${token}`} : {}), 'User-Agent': 'opencrm-import'}, viaProxy ? proxyUrl : '', 120000); }
+      catch (error) {
+        if (attempt++ >= retries) throw error;
+        if (proxyUrl) viaProxy = !viaProxy;
+        await sleep(Math.min(10000, 500 * 2 ** attempt));
+        continue;
+      }
       if ([301, 302, 303, 307, 308].includes(response.status) && response.headers?.location) { url = new URL(response.headers.location, target).href; hop++; continue; }
       if ((response.status === 429 || response.status >= 500) && attempt++ < retries) { await sleep(Math.min(30000, 1500 * 2 ** attempt)); continue; }
       if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
@@ -403,7 +420,7 @@ export function transform(dump, existing = {users: [], maxStageId: 0}) {
   }
 
   // Notes.
-  const noteRow = note => ({id: note.id, user_id: uid(note.created_by), body: noteBody(note) || `[${note.note_type}]`, created_at: toText(note.created_at) ?? toText(Date.now() / 1000), updated_at: toText(note.updated_at) ?? toText(note.created_at) ?? toText(Date.now() / 1000)});
+  const noteRow = note => ({id: note.id, note_type: clip(note.note_type || 'common', 40), user_id: uid(note.created_by), body: noteBody(note) || `[${note.note_type}]`, created_at: toText(note.created_at) ?? toText(Date.now() / 1000), updated_at: toText(note.updated_at) ?? toText(note.created_at) ?? toText(Date.now() / 1000)});
   for (const note of dump.notes_leads) {
     if (!dealIds.has(note.entity_id)) { warn('Примечания удалённых сделок пропущены', note.id); continue; }
     rows.notes.push({...noteRow(note), deal_id: note.entity_id, pinned: 0});

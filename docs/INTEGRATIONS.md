@@ -176,10 +176,10 @@ Fields: `title` (required, up to 500 characters), `description` (up to 5000), `t
 ## Notes of all records
 
 ```text
-GET /api/v1/notes?entity_type=deal       # deal | contact | company (required); filters: entity_id, created_since, updated_since; after/limit
+GET /api/v1/notes?entity_type=deal       # deal | contact | company (required); filters: entity_id, note_type, created_since, updated_since; after/limit
 ```
 
-Needs the read scope of that type. Items: `id`, `entity_type`, `entity_id`, `body`, `user_id`, `created_at`, `updated_at`, and `pinned` for deal notes. IDs of deal notes and of contact/company notes are separate sequences, so paginate one `entity_type` at a time.
+Needs the read scope of that type. Items: `id`, `entity_type`, `entity_id`, `body`, `note_type`, `user_id`, `created_at`, `updated_at`, and `pinned` for deal notes. `note_type` is `common` for notes written in the interface or through the API; notes loaded from amoCRM keep its type (`call_in`, `call_out`, `amomail_message`, `service_message`, `attachment`, …). `GET /api/v1/deals/:id/notes`, `/contacts/:id/notes` and `/companies/:id/notes` return it too and accept `?note_type=`; the `note.created` webhook carries it. IDs of deal notes and of contact/company notes are separate sequences, so paginate one `entity_type` at a time.
 
 ## Employees
 
