@@ -11,7 +11,7 @@ function SettingInput({field, value, secretSet, onChange}) {
   if (field.type === 'boolean') return <label className="plugin-check"><input id={id} type="checkbox" checked={!!value} onChange={event => onChange(event.target.checked)}/> {field.label}</label>;
   const control = field.type === 'textarea' ? <textarea id={id} value={value ?? ''} onChange={event => onChange(event.target.value)} rows={4}/>
     : field.type === 'select' ? <select id={id} value={value ?? ''} onChange={event => onChange(event.target.value)}><option value="">—</option>{field.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
-    : <input id={id} type={field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'} value={value ?? ''} autoComplete="off" placeholder={field.type === 'password' && secretSet ? 'Сохранено — оставьте пустым, чтобы не менять' : ''} onChange={event => onChange(event.target.value)}/>;
+    : <input id={id} type={field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'} value={value ?? ''} autoComplete={field.type === 'password' ? 'new-password' : 'off'} data-1p-ignore="" data-lpignore="true" placeholder={field.type === 'password' && secretSet ? 'Сохранено — оставьте пустым, чтобы не менять' : ''} onChange={event => onChange(event.target.value)}/>;
   return <label className="plugin-field" htmlFor={id}><span>{field.label}{field.required && ' *'}</span>{control}</label>;
 }
 
