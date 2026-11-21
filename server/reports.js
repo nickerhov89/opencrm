@@ -74,7 +74,8 @@ export function registerReports(app, db, {auth, admin, audit}) {
     }
     const list = [...people.values()].sort((a, b) => (a.user_id == null) - (b.user_id == null) || b.incoming + b.outgoing - a.incoming - a.outgoing || a.name.localeCompare(b.name, 'ru'));
     const total = list.reduce((sum, person) => ({incoming: sum.incoming + person.incoming, outgoing: sum.outgoing + person.outgoing, seconds: sum.seconds + person.seconds}), {incoming: 0, outgoing: 0, seconds: 0});
-    const staff = list.filter(person => person.user_id != null).length || 1;
+    // As in amoCRM, the average is over every row of the chart, calls without an employee included.
+    const staff = list.length || 1;
     const recent = rows.filter(row => !direction || row.direction === direction)
       .sort((a, b) => b.at.localeCompare(a.at) || b.key.localeCompare(a.key)).slice(0, 100)
       .map(row => ({...row, user_name: row.user_id == null ? '' : users.get(Number(row.user_id)) || ''}));
