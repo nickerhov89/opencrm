@@ -2,6 +2,10 @@
 
 ## Unreleased — closer to amoCRM
 
+- Mail sync links letters to deals through an address index built once per run: a letter takes milliseconds instead of a scan of every deal (about 18 s per letter on 7500 deals).
+- `deals.source` mirrors the deal custom field «Источник» on every write (interface, API, import) without moving `updated_at` or sending `deal.updated`; deals loaded before are filled on start. The deal card hides the built-in «Источник» when the field exists.
+- Completed tasks in the deal feed show when they were completed and who completed them (`tasks.completed_by`), not the due date.
+- Task types from amoCRM: «Оформить сделку», «Передать проект», «Поставить задачу», «Дубль», «Повторная заявка».
 - «Почта» in the left menu with an unread badge: folders (inbox, unread, sent, without a deal, all), mailbox choice, search, the letter with its thread, «Ответить», «Ответить всем», «Непрочитанное», «Прочитать все». Employees see letters of the deals they can open, admins see all.
 - «Написать» sends a new letter from a connected mailbox; in the deal card «Письмо» now sends for real (recipients from the deal contacts) and the letter lands in the feed. «Записать без отправки» keeps the manual record. API: `GET /api/mail/summary`, `GET /api/mail/emails`, `GET /api/mail/emails/:id`, `POST /api/mail/send`, `POST /api/mail/emails/:id/reply`, read marks.
 - «Сообщения» at the bottom of the menu: overdue tasks and tasks due within the hour, unread letters of my deals, new requests in «Неразобранное», with a badge for what appeared since the panel was last opened.
