@@ -5,6 +5,14 @@
 - Dark theme in the style of amoCRM (blue-black surfaces, light text): «Тема» at the bottom of the left menu and Settings → General offer «Авто» (follows the system), «Светлая», «Тёмная». The choice is saved per employee (`PUT /api/me/theme`, `theme` in `/api/me`) and in the browser, applied before the first paint, and switches with a circle spreading from the button.
 - The light styles are unchanged: at build time every CSS rule that sets a color gets a dark twin under `:root[data-theme=dark]` (`scripts/dark-theme.mjs`), so new styles get the dark theme without extra work. The landing page and public forms stay light.
 
+## Unreleased — plugins
+
+- Plugins extend OpenCRM without changing its code: a ZIP with `plugin.json`, an optional server module and an optional browser module. Admins upload, configure, enable, update and delete them in Settings → Plugins; every action is in the security log. `OPENCRM_PLUGIN_UPLOAD=0` turns uploads off, `npm run plugin -- pack|install|list|enable|disable` works on the server.
+- Server API (`ctx`): routes behind sign-in and public routes for incoming webhooks, CRM events (the webhook event list), periodic tasks, key-value storage, requests in «Неразобранное», events and notes in the deal feed, the plugin log. Settings forms are built from `plugin.json`; password settings are encrypted and never sent to the browser.
+- Browser API: a page in the left menu (`/apps/<plugin>/<page>`) and a panel in the deal card, drawn with the app's React or plain DOM.
+- Examples: `tilda-forms` (Tilda forms → «Неразобранное», deduplicated by `tranid`) and `hello-world`. See docs/PLUGINS.md.
+- `mango-office` plugin: Mango Office VPBX call summaries (signed) go to the open deal's feed, or to the contact or company history; inbound calls from unknown numbers become one request in «Неразобранное» per number. Recordings play in the deal card and on the «Звонки» page (journal with a missed-calls filter), proxied from Mango on demand. New plugin API: `ctx.crm.addCommunication` and `api.url` in the browser.
+
 ## Unreleased — closer to amoCRM
 
 - Stage transition rules can bind administrators too (**Правила действуют и на администраторов**), like the amoCRM funnel guard; a refused move names the stages the deal may go to.

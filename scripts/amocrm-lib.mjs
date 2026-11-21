@@ -54,9 +54,9 @@ export function amoClient({baseUrl, token, proxyUrl = '', minIntervalMs = 160, r
     const url = new URL(path, base.origin);
     for (const [key, value] of Object.entries(params)) for (const item of [].concat(value)) url.searchParams.append(key, String(item));
     for (let attempt = 1; ; attempt++) {
-      const wait = last + minIntervalMs - Date.now();
-      if (wait > 0) await sleep(wait);
-      last = Date.now();
+      const slot = Math.max(Date.now(), last + minIntervalMs);
+      last = slot;
+      if (slot > Date.now()) await sleep(slot - Date.now());
       let response;
       const headers = {Authorization: `Bearer ${token}`, Accept: 'application/json', 'User-Agent': 'opencrm-import'};
       try {
@@ -93,9 +93,9 @@ export function amoClient({baseUrl, token, proxyUrl = '', minIntervalMs = 160, r
     const trusted = host => host === base.hostname || /(^|\.)(amocrm\.(ru|com)|kommo\.com)$/i.test(host);
     for (let hop = 0, attempt = 1, viaProxy = false; hop < 6;) {
       const target = new URL(url);
-      const wait = last + minIntervalMs - Date.now();
-      if (wait > 0) await sleep(wait);
-      last = Date.now();
+      const slot = Math.max(Date.now(), last + minIntervalMs);
+      last = slot;
+      if (slot > Date.now()) await sleep(slot - Date.now());
       let response;
       try { response = await get(target.href, {...(trusted(target.hostname) ? {Authorization: `Bearer ${token}`} : {}), 'User-Agent': 'opencrm-import'}, viaProxy ? proxyUrl : '', 120000); }
       catch (error) {
@@ -681,11 +681,14 @@ export async function loadDump(db, dump, {dryRun = false, replace = false, keepD
 
 // Run once by the server after a deploy (server/index.js) when AMO_BASE_URL and AMO_ACCESS_TOKEN are
 // set: downloads the events of deals, contacts and companies straight from amoCRM and writes the card
-// history of the records already loaded here, page by page. Names come from this database and from
-// the small amoCRM lists (users, pipelines, fields). Done once: app_settings remembers it; an
-// interrupted run starts again on the next start (history from amoCRM is replaced, not duplicated).
+// history of the records already loaded here. Names come from this database and from the small amoCRM
+// lists (users, pipelines, fields). Events are read up to the moment of the first start (amoCRM takes the range only with both ends), newest first,
+// several pages at a time within the rate limit. The page reached is kept in app_settings, so a restart
+// (a deploy) continues where the load stopped; the rows of a page are written again, never doubled. When
+// all is loaded, app_settings remembers it and nothing more happens.
 export const historySettingKey = 'amocrm_history_loaded';
-export async function syncHistoryFromAmo(db, client, {log = console.log} = {}) {
+export const historyProgressKey = 'amocrm_history_progress';
+export async function syncHistoryFromAmo(db, client, {log = console.log, parallel = 6} = {}) {
   if ((await db.query('SELECT value FROM app_settings WHERE key=$1', [historySettingKey])).rows.length) return null;
   const all = async (sql) => (await db.query(sql)).rows.map(r => ({...r, id: Number(r.id)}));
   const [deals, contacts, companies, users] = [await all('SELECT id,name FROM deals'), await all('SELECT id,name FROM contacts'), await all('SELECT id,name FROM companies'), await all('SELECT id,email FROM users')];
@@ -700,23 +703,41 @@ export async function syncHistoryFromAmo(db, client, {log = console.log} = {}) {
   const byEmail = new Map(users.map(u => [String(u.email).toLowerCase(), u.id])), userIds = new Set(users.map(u => u.id));
   const userMap = new Map(amoUsers.map(u => [Number(u.id), byEmail.get(String(u.email || '').trim().toLowerCase()) ?? (userIds.has(Number(u.id)) ? Number(u.id) : null)]));
   const ids = {uid: id => userMap.get(Number(id)) ?? null, dealIds: new Set(deals.map(r => r.id)), contactIds: new Set(contacts.map(r => r.id)), companyIds: new Set(companies.map(r => r.id)), warn: () => {}};
-  const affected = result => Number(result.rowCount ?? result.affectedRows ?? 0);
-  const replaced = affected(await db.query('DELETE FROM activity WHERE amo_event_id IS NOT NULL')) + affected(await db.query('DELETE FROM entity_activity WHERE amo_event_id IS NOT NULL'));
-  log(`amoCRM: загрузка истории карточек${replaced ? ` (заменяется загруженная раньше: ${replaced})` : ''}`);
-  const counts = {events: 0, activity: 0, entity_activity: 0};
-  let lastLog = Date.now();
-  for (let page = 1; ; page++) {
-    const data = await client.request('/api/v4/events', {'filter[entity][]': ['lead', 'contact', 'company'], limit: 100, page});
-    const events = data?._embedded?.events || [];
+  const saveSetting = (key, value) => db.query('INSERT INTO app_settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value', [key, JSON.stringify(value)]);
+  const saved = (await db.query('SELECT value FROM app_settings WHERE key=$1', [historyProgressKey])).rows[0];
+  const progress = saved ? JSON.parse(saved.value) : {until: Math.floor(Date.now() / 1000), page: 1, events: 0, activity: 0, entity_activity: 0};
+  if (!saved) await saveSetting(historyProgressKey, progress);
+  log(progress.page > 1 ? `amoCRM: продолжение загрузки истории со страницы ${progress.page} (событий уже ${progress.events})` : 'amoCRM: загрузка истории карточек');
+  const params = page => ({'filter[entity][]': ['lead', 'contact', 'company'], 'filter[created_at][from]': 1, 'filter[created_at][to]': progress.until, limit: 100, page});
+  let lastLog = Date.now(), done = false;
+  while (!done) {
+    const pages = Array.from({length: parallel}, (_, i) => progress.page + i);
+    const results = await Promise.all(pages.map(page => client.request('/api/v4/events', params(page))));
+    // amoCRM paging is not perfectly stable: an event may show up on two neighbouring pages.
+    const events = [], seen = new Set();
+    for (const data of results) {
+      const chunk = data?._embedded?.events || [];
+      for (const event of chunk) if (!seen.has(event.id)) { seen.add(event.id); events.push(event); }
+      if (!chunk.length || !data._links?.next) { done = true; break; }
+    }
     const rows = {activity: [], entity_activity: []};
     historyRows({...dump, events_history: events}, rows, ids);
-    await insertRows(db, 'activity', rows.activity);
-    await insertRows(db, 'entity_activity', rows.entity_activity);
-    counts.events += events.length; counts.activity += rows.activity.length; counts.entity_activity += rows.entity_activity.length;
-    if (Date.now() - lastLog > 30000) { lastLog = Date.now(); log(`amoCRM: событий ${counts.events}, записей истории ${counts.activity + counts.entity_activity}`); }
-    if (!events.length || !data._links?.next) break;
+    await db.transaction(async () => {
+      const eventIds = events.map(event => clip(event.id, 64));
+      if (eventIds.length) {
+        await db.query('DELETE FROM activity WHERE amo_event_id = ANY($1)', [eventIds]);
+        await db.query('DELETE FROM entity_activity WHERE amo_event_id = ANY($1)', [eventIds]);
+      }
+      await insertRows(db, 'activity', rows.activity);
+      await insertRows(db, 'entity_activity', rows.entity_activity);
+      progress.page += parallel; progress.events += events.length; progress.activity += rows.activity.length; progress.entity_activity += rows.entity_activity.length;
+      await saveSetting(historyProgressKey, progress);
+    })();
+    if (Date.now() - lastLog > 30000) { lastLog = Date.now(); log(`amoCRM: событий ${progress.events}, записей истории ${progress.activity + progress.entity_activity}`); }
   }
-  await db.query('INSERT INTO app_settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value', [historySettingKey, JSON.stringify({at: new Date().toISOString(), ...counts})]);
+  const counts = {events: progress.events, activity: progress.activity, entity_activity: progress.entity_activity};
+  await saveSetting(historySettingKey, {at: new Date().toISOString(), ...counts});
+  await db.query('DELETE FROM app_settings WHERE key=$1', [historyProgressKey]);
   log(`amoCRM: история загружена — событий ${counts.events}, в сделках ${counts.activity}, в контактах и компаниях ${counts.entity_activity}`);
   return counts;
 }

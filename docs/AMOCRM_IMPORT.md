@@ -44,7 +44,7 @@ AMO_ACCESS_TOKEN=<long-lived token>
 # AMO_PROXY_URL=http://[user:password@]host:port   if amoCRM is reached through a proxy
 ```
 
-and deploy (or `docker compose -p opencrm up -d`). After start the server downloads the events of deals, contacts and companies in the background and writes the history of the records already in the CRM; the log shows the progress (`docker compose -p opencrm logs -f opencrm | grep amoCRM`). It happens once: the CRM remembers it (`app_settings` key `amocrm_history_loaded`; a `load` or `history` with events sets it too), and a run interrupted by a restart starts again from the beginning on the next start. Afterwards the token can be removed from `.env`.
+and deploy (or `docker compose -p opencrm up -d`). After start the server downloads the events of deals, contacts and companies in the background and writes the history of the records already in the CRM; the log shows the progress (`docker compose -p opencrm logs -f opencrm | grep amoCRM`). It happens once: the CRM remembers it (`app_settings` key `amocrm_history_loaded`; a `load` or `history` with events sets it too), and a run interrupted by a restart (for example a deploy) continues on the next start from the page it reached. Events are read up to the moment of the first start, several pages at a time within `AMO_RPS`. Afterwards the token can be removed from `.env`.
 
 By hand instead: run `export` again — the files already downloaded are kept, only the history is fetched — and then:
 

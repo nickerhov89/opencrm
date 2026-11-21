@@ -400,6 +400,8 @@ CREATE INDEX IF NOT EXISTS idx_emails_sent ON emails(sent_at);
 -- History loaded from amoCRM keeps the event ID, so a repeated history load replaces it and leaves history written here alone.
 ALTER TABLE activity ADD COLUMN IF NOT EXISTS amo_event_id TEXT;
 ALTER TABLE entity_activity ADD COLUMN IF NOT EXISTS amo_event_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_activity_amo_event ON activity(amo_event_id) WHERE amo_event_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_entity_activity_amo_event ON entity_activity(amo_event_id) WHERE amo_event_id IS NOT NULL;
 CREATE OR REPLACE FUNCTION normalize_telegram(value text) RETURNS text LANGUAGE sql IMMUTABLE AS $$
   SELECT lower(regexp_replace(btrim(COALESCE(value, '')), '^(https?://)?(www[.])?((t|telegram)[.]me/)?@?', ''))
 $$;
@@ -426,6 +428,11 @@ CREATE INDEX IF NOT EXISTS idx_stage_transitions_to ON stage_transitions(to_stag
 -- Idempotent creates through API v1 (POST /api/v1/leads keeps its own table).
 CREATE TABLE IF NOT EXISTS api_requests (api_key_id BIGINT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, resource TEXT NOT NULL, resource_id BIGINT NOT NULL, created_at TEXT NOT NULL DEFAULT now_text(), PRIMARY KEY(api_key_id,idempotency_key));
 
+-- Plugins (server/plugins.js): installed packages, their settings and key-value storage.
+-- events_json lists the events a running plugin listens to; event_cursor is the last one it got.
+CREATE TABLE IF NOT EXISTS plugins (id TEXT PRIMARY KEY, version TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)), settings_json TEXT NOT NULL DEFAULT '{}', secrets TEXT NOT NULL DEFAULT '', events_json TEXT NOT NULL DEFAULT '[]', event_cursor BIGINT NOT NULL DEFAULT 0, installed_at TEXT NOT NULL DEFAULT now_text());
+CREATE TABLE IF NOT EXISTS plugin_storage (plugin_id TEXT NOT NULL REFERENCES plugins(id) ON DELETE CASCADE, key TEXT NOT NULL, value_json TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT now_text(), PRIMARY KEY(plugin_id,key));
+
 CREATE OR REPLACE FUNCTION trg_webhook_delivery_enqueue() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   INSERT INTO webhook_deliveries (endpoint_id,event_id)
@@ -433,10 +440,11 @@ BEGIN
   WHERE w.active = 1 AND EXISTS (SELECT 1 FROM json_array_elements_text(w.events_json::json) event WHERE event = NEW.event_type);
   RETURN NULL;
 END $$;
--- Events are stored only when an active endpoint subscribes to them.
+-- Events are stored only when an active endpoint or an enabled plugin subscribes to them.
 CREATE OR REPLACE FUNCTION webhook_emit(kind text, payload json) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM webhook_endpoints w WHERE w.active = 1 AND EXISTS (SELECT 1 FROM json_array_elements_text(w.events_json::json) event WHERE event = kind)) THEN
+  IF EXISTS (SELECT 1 FROM webhook_endpoints w WHERE w.active = 1 AND EXISTS (SELECT 1 FROM json_array_elements_text(w.events_json::json) event WHERE event = kind))
+    OR EXISTS (SELECT 1 FROM plugins p WHERE p.enabled = 1 AND EXISTS (SELECT 1 FROM json_array_elements_text(p.events_json::json) event WHERE event = kind)) THEN
     INSERT INTO webhook_events (event_type,payload_json) VALUES (kind, payload::text);
   END IF;
 END $$;
