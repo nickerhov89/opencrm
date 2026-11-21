@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — load and abuse limits
+
+- Sign-in limits use a 5-minute window: 10 failed attempts for one account from one address, 30 from one address over all accounts, 50 for one account from anywhere (not applied to a browser that signed in before). An IPv6 client counts as its /64, and a flood of new entries can no longer push out counters that are already at their limit.
+- Passwords are checked with asynchronous scrypt, so sign-in attempts no longer stop the server from answering other requests.
+- Every database query is limited to `DATABASE_STATEMENT_TIMEOUT_MS` (default 30 s); a request that runs out of time or waits too long for a connection gets 503 instead of hanging the CRM for everyone.
+- Public lead forms accept at most 5 submissions from one address in 10 minutes across all forms (`PUBLIC_FORM_LIMIT`, `PUBLIC_FORM_WINDOW_MINUTES`); submissions refused for missing contacts are not counted.
+- A POST without a JSON body gets a validation error instead of a 500 with a stack trace in the log.
+- `compose.yaml` rotates container logs: at most 5 files of 10 MB per service.
+
 ## Unreleased — mail in deals
 
 - Connected mailboxes (Settings → Mail, admins): IMAP/SMTP with an app password, or Google Workspace through a service account with domain-wide delegation (XOAUTH2). The connection is checked before saving; passwords and keys are encrypted with `OPENCRM_SECRET_KEY` or a key file outside the backups.

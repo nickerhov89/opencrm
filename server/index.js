@@ -1,5 +1,5 @@
 import express from 'express';
-import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,11 +8,13 @@ import { parseCsv, quoteCsvCell } from './csv.js';
 import { registerIntegrations } from './integrations.js';
 import { registerMail, dealEmails, secretFilePath } from './mail.js';
 import { createStageRules, RuleError } from './stage-rules.js';
-import { permissionEntities, permissionActions, normalizePermissions, noPermissions, defaultMemberPermissions, securityHeaders, createLoginLimiter, newTotpSecret, verifyTotp, otpauthUrl } from './security.js';
+import { permissionEntities, permissionActions, normalizePermissions, noPermissions, defaultMemberPermissions, securityHeaders, createLoginLimiter, createRateLimiter, ipBucket, hashPassword, verifyPassword, newTotpSecret, verifyTotp, otpauthUrl } from './security.js';
 import {defaultDealCardFields,validDealCardFields} from '../src/deal-card-layout.js';
 
 const app = express();
-const db = await createDb();
+// One query may run at most DATABASE_STATEMENT_TIMEOUT_MS (default 30 s, 0 = no limit).
+const statementTimeout=Number(process.env.DATABASE_STATEMENT_TIMEOUT_MS??30000);
+const db = await createDb({statementTimeoutMs:Number.isFinite(statementTimeout)&&statementTimeout>=0?statementTimeout:30000});
 const stageRules = createStageRules(db);
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const uploadDir = resolve(process.env.UPLOAD_DIR || resolve(root,'data/uploads'));
@@ -42,13 +44,14 @@ app.use((req,res,next)=>{
   next();
 });
 app.use(express.json({ limit: '1mb' }));
+// Express 5 leaves req.body undefined for a request without a JSON body; handlers read fields from it,
+// so an empty POST answered 500 (and wrote a stack trace to the log) instead of a validation error.
+app.use((req,_res,next)=>{if(req.body===undefined)req.body={};next()});
 
 const fail = (res, code, message) => res.status(code).json({ error: message });
-const hashPassword = password => { const salt = randomBytes(16).toString('hex'); return `${salt}:${scryptSync(password,salt,64).toString('hex')}`; };
-const verifyPassword = (password, stored) => { const [salt, hash] = stored.split(':'); if (!salt || !hash) return false; const computed = scryptSync(password,salt,64); const saved = Buffer.from(hash,'hex'); return saved.length === computed.length && timingSafeEqual(saved,computed); };
 const tokenHash = token => createHash('sha256').update(token).digest('hex');
 const loginLimiter=createLoginLimiter();
-const dummyPasswordHash=hashPassword(randomBytes(16).toString('hex'));
+const dummyPasswordHash=await hashPassword(randomBytes(16).toString('hex'));
 const clientIp=req=>String(req.ip||req.socket?.remoteAddress||'').slice(0,64);
 const audit=async (req,action,{target='',details='',userId,actor}={})=>{try{await db.prepare('INSERT INTO audit_log (user_id,actor,action,target,details,ip) VALUES (?,?,?,?,?,?)').run(userId===undefined?req?.user?.id??null:userId,String(actor??req?.user?.email??'').slice(0,254),action,String(target).slice(0,255),String(details).slice(0,2000),req?clientIp(req):'')}catch(error){console.error('Audit log:',error)}};
 const purgeSecurityData=async ()=>{await db.prepare('DELETE FROM sessions WHERE expires_at<=?').run(Date.now());await db.prepare('DELETE FROM trusted_devices WHERE expires_at<=?').run(Date.now());await db.prepare("DELETE FROM audit_log WHERE created_at<datetime('now',?)").run(`-${Math.max(30,Number(process.env.AUDIT_LOG_RETENTION_DAYS)||365)} days`)};
@@ -138,14 +141,14 @@ const dealContactsFor=async (req,id)=>await db.prepare(`SELECT c.id,c.name,c.pos
 app.get('/api/status', async (_req,res) => res.json({ setup: (await db.prepare('SELECT COUNT(*) n FROM users').get()).n === 0 }));
 const publicUser=u=>({id:u.id,name:u.name,email:u.email,role:u.role,deal_access:u.deal_access,task_access:u.task_access,contact_access:u.contact_access,company_access:u.company_access,group_id:u.group_id,totp_enabled:!!u.totp_secret,permissions:normalizePermissions(parsePermissions(u.permissions_json))});
 const activeAdminCount=async ()=>(await db.prepare("SELECT COUNT(*) n FROM users WHERE role='admin' AND disabled_at IS NULL").get()).n;
-app.post('/api/setup',async (req,res) => { if ((await db.prepare('SELECT COUNT(*) n FROM users').get()).n) return fail(res,409,'Аккаунт уже создан'); const {name,email,password}=req.body; if (!required(name,120)||!required(email,254)||!email.includes('@')||!validNewPassword(password)) return fail(res,400,'Укажите имя, email и пароль от 10 символов'); const result=await db.prepare('INSERT INTO users (name,email,password_hash,role,password_changed_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP)').run(name.trim(),email.trim().toLowerCase(),hashPassword(password),'admin'); await setSession(res,result.lastInsertRowid); await audit(req,'auth.setup',{userId:result.lastInsertRowid,actor:email.trim().toLowerCase(),target:`user:${result.lastInsertRowid}`}); res.json(publicUser(await db.prepare('SELECT * FROM users WHERE id=?').get(result.lastInsertRowid))); });
+app.post('/api/setup',async (req,res) => { if ((await db.prepare('SELECT COUNT(*) n FROM users').get()).n) return fail(res,409,'Аккаунт уже создан'); const {name,email,password}=req.body; if (!required(name,120)||!required(email,254)||!email.includes('@')||!validNewPassword(password)) return fail(res,400,'Укажите имя, email и пароль от 10 символов'); const result=await db.prepare('INSERT INTO users (name,email,password_hash,role,password_changed_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP)').run(name.trim(),email.trim().toLowerCase(),await hashPassword(password),'admin'); await setSession(res,result.lastInsertRowid); await audit(req,'auth.setup',{userId:result.lastInsertRowid,actor:email.trim().toLowerCase(),target:`user:${result.lastInsertRowid}`}); res.json(publicUser(await db.prepare('SELECT * FROM users WHERE id=?').get(result.lastInsertRowid))); });
 app.post('/api/login',async (req,res) => {
   const email=value(req.body?.email,254).toLowerCase(),ip=clientIp(req),password=req.body?.password,code=typeof req.body?.code==='string'?req.body.code.replace(/\s+/g,''):'';
   const u=email?await db.prepare('SELECT * FROM users WHERE email=?').get(email):null;
   const retry=loginLimiter.blocked(ip,email,{trusted:await deviceTrusted(req,u?.id)});
   if(retry){res.set('Retry-After',String(retry));await audit(req,'auth.login_blocked',{userId:null,actor:email});return fail(res,429,'Слишком много попыток входа. Повторите позже')}
   // A dummy hash keeps the response time the same whether or not the email exists.
-  const passwordOk=typeof password==='string'&&password.length<=1024&&verifyPassword(password,u?.password_hash||dummyPasswordHash)&&!!u;
+  const passwordOk=typeof password==='string'&&password.length<=1024&&await verifyPassword(password,u?.password_hash||dummyPasswordHash)&&!!u;
   if(!passwordOk||u.disabled_at){loginLimiter.fail(ip,email);await audit(req,'auth.login_failed',{userId:u?.id??null,actor:email,details:u?.disabled_at&&passwordOk?'Учётная запись отключена':'Неверный пароль'});return fail(res,401,'Неверный email или пароль')}
   if(u.totp_secret){
     if(!code)return res.status(401).json({error:'Введите код из приложения-аутентификатора',totp_required:true});
@@ -159,7 +162,7 @@ app.post('/api/logout',auth,async (req,res) => { await db.prepare('DELETE FROM s
 app.get('/api/me',auth,(req,res) => res.json(req.user));
 const currentUserRow=async req=>await db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
 const confirmIdentity=async (req,row,{requireCode=true}={})=>{
-  if(typeof req.body?.current_password!=='string'||req.body.current_password.length>1024||!verifyPassword(req.body.current_password,row.password_hash))return 'Неверный текущий пароль';
+  if(typeof req.body?.current_password!=='string'||req.body.current_password.length>1024||!await verifyPassword(req.body.current_password,row.password_hash))return 'Неверный текущий пароль';
   if(requireCode&&row.totp_secret){const step=verifyTotp(row.totp_secret,String(req.body?.code||'').replace(/\s+/g,''),{lastCounter:row.totp_last_counter});if(step===null)return 'Неверный код подтверждения';await db.prepare('UPDATE users SET totp_last_counter=? WHERE id=?').run(step,row.id)}
   return null;
 };
@@ -169,8 +172,8 @@ app.post('/api/me/password',auth,async (req,res)=>{
   const row=await currentUserRow(req),problem=await confirmIdentity(req,row);
   if(problem){loginLimiter.fail(clientIp(req),req.user.email);await audit(req,'auth.password_change_failed',{details:problem});return fail(res,403,problem)}
   if(!validNewPassword(req.body.new_password))return fail(res,400,'Новый пароль должен быть от 10 до 1024 символов');
-  if(verifyPassword(req.body.new_password,row.password_hash))return fail(res,400,'Новый пароль совпадает с текущим');
-  await db.prepare('UPDATE users SET password_hash=?,password_changed_at=CURRENT_TIMESTAMP WHERE id=?').run(hashPassword(req.body.new_password),row.id);
+  if(await verifyPassword(req.body.new_password,row.password_hash))return fail(res,400,'Новый пароль совпадает с текущим');
+  await db.prepare('UPDATE users SET password_hash=?,password_changed_at=CURRENT_TIMESTAMP WHERE id=?').run(await hashPassword(req.body.new_password),row.id);
   const revoked=await revokeSessions(row.id,req.sessionToken);
   await audit(req,'auth.password_changed',{target:`user:${row.id}`,details:`Завершено других сеансов: ${revoked}`});
   res.json({ok:true,revoked_sessions:revoked});
@@ -322,7 +325,7 @@ app.post('/api/users',auth,admin,async (req,res) => {
   const {name,email,password,role='member',deal_access='all',task_access='all',contact_access='all',company_access='all'}=req.body,group=int(req.body.group_id),rawPermissions=req.body.permissions??{};
   if(!required(name,120)||!required(email,254)||!email.includes('@')||!validNewPassword(password)||!['admin','member'].includes(role)||!['all','own'].includes(deal_access)||!['all','own'].includes(task_access)||!['all','own'].includes(contact_access)||!['all','own'].includes(company_access)||group&&!await idExists('user_groups',group)||!validPermissions(rawPermissions))return fail(res,400,'Проверьте данные сотрудника');
   const permissions=normalizePermissions(rawPermissions,defaultMemberPermissions());
-  try{const result=await db.prepare('INSERT INTO users (name,email,password_hash,role,deal_access,task_access,contact_access,company_access,group_id,permissions_json,password_changed_at) VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)').run(name.trim(),email.trim().toLowerCase(),hashPassword(password),role,deal_access,task_access,contact_access,company_access,group,JSON.stringify(permissions));await audit(req,'user.created',{target:`user:${result.lastInsertRowid} ${email.trim().toLowerCase()}`,details:`Роль: ${role}; права: ${permissionSummary(permissions)}`});res.status(201).json({id:result.lastInsertRowid,name:name.trim(),email:email.trim().toLowerCase(),role,deal_access,task_access,contact_access,company_access,group_id:group,permissions,disabled:false,totp_enabled:false})}
+  try{const result=await db.prepare('INSERT INTO users (name,email,password_hash,role,deal_access,task_access,contact_access,company_access,group_id,permissions_json,password_changed_at) VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)').run(name.trim(),email.trim().toLowerCase(),await hashPassword(password),role,deal_access,task_access,contact_access,company_access,group,JSON.stringify(permissions));await audit(req,'user.created',{target:`user:${result.lastInsertRowid} ${email.trim().toLowerCase()}`,details:`Роль: ${role}; права: ${permissionSummary(permissions)}`});res.status(201).json({id:result.lastInsertRowid,name:name.trim(),email:email.trim().toLowerCase(),role,deal_access,task_access,contact_access,company_access,group_id:group,permissions,disabled:false,totp_enabled:false})}
   catch(error){if(error.code==='23505')return fail(res,409,'Email уже используется');throw error}
 });
 app.patch('/api/users/:id',auth,admin,async (req,res)=>{
@@ -360,7 +363,7 @@ app.post('/api/users/:id/password',auth,admin,async (req,res)=>{
   const user=await managedUser(req,res);if(!user)return;
   if(user.id===req.user.id)return fail(res,409,'Свой пароль меняйте в разделе «Безопасность»');
   if(!validNewPassword(req.body?.password))return fail(res,400,'Пароль должен быть от 10 до 1024 символов');
-  const revoked=await db.transaction(async ()=>{await db.prepare('UPDATE users SET password_hash=?,password_changed_at=CURRENT_TIMESTAMP WHERE id=?').run(hashPassword(req.body.password),user.id);await forgetDevices(user.id);return await revokeSessions(user.id)})();
+  const revoked=await db.transaction(async ()=>{await db.prepare('UPDATE users SET password_hash=?,password_changed_at=CURRENT_TIMESTAMP WHERE id=?').run(await hashPassword(req.body.password),user.id);await forgetDevices(user.id);return await revokeSessions(user.id)})();
   await audit(req,'user.password_reset',{target:`user:${user.id} ${user.email}`,details:`Завершено сеансов: ${revoked}`});
   res.json({ok:true,revoked_sessions:revoked});
 });
@@ -502,10 +505,14 @@ app.post('/api/inbox/:id/restore',auth,requirePermission('deal','create'),async 
 app.get('/api/pipelines/:id/forms',auth,async (req,res)=>{const pid=int(req.params.id);if(!await idExists('pipelines',pid))return fail(res,404,'Воронка не найдена');res.json(await db.prepare('SELECT id,pipeline_id,title,token,active,created_at FROM lead_forms WHERE pipeline_id=? ORDER BY id DESC').all(pid))});
 app.post('/api/pipelines/:id/forms',auth,admin,async (req,res)=>{const pid=int(req.params.id),title=value(req.body.title,120);if(!await idExists('pipelines',pid))return fail(res,404,'Воронка не найдена');if(!title)return fail(res,400,'Укажите название формы');const token=randomBytes(24).toString('hex');const row=await db.prepare('INSERT INTO lead_forms (pipeline_id,title,token) VALUES (?,?,?)').run(pid,title,token);res.status(201).json({id:row.lastInsertRowid,pipeline_id:pid,title,token,active:1})});
 app.patch('/api/forms/:id',auth,admin,async (req,res)=>{const id=int(req.params.id),form=await db.prepare('SELECT * FROM lead_forms WHERE id=?').get(id);if(!form)return fail(res,404,'Форма не найдена');const title=value(req.body.title,120),active=req.body.active;if(!title||typeof active!=='boolean')return fail(res,400,'Проверьте настройки формы');await db.prepare('UPDATE lead_forms SET title=?,active=? WHERE id=?').run(title,active?1:0,id);res.json({id,title,active:active?1:0})});
-const publicFormRates=new Map();
-const prunePublicFormRates=now=>{if(publicFormRates.size<5000)return;for(const [key,times] of publicFormRates)if(!times.some(time=>now-time<60000))publicFormRates.delete(key);while(publicFormRates.size>=5000)publicFormRates.delete(publicFormRates.keys().next().value)};
+// Public lead forms: at most PUBLIC_FORM_LIMIT accepted submissions (default 5) from one address — an
+// IPv4 address or an IPv6 /64 — per PUBLIC_FORM_WINDOW_MINUTES (default 10), across all forms.
+// Submissions refused for missing contact data are not counted, so a visitor can fix a typo.
+const envCount=(name,fallback,max)=>{const raw=Number(process.env[name]);return Number.isSafeInteger(raw)&&raw>0&&raw<=max?raw:fallback};
+const publicFormLimiter=createRateLimiter({limit:envCount('PUBLIC_FORM_LIMIT',5,1000),windowMs:envCount('PUBLIC_FORM_WINDOW_MINUTES',10,1440)*60000});
+const publicFormLimited=(req,res)=>{const retry=publicFormLimiter.hit(ipBucket(clientIp(req)));if(!retry)return false;res.set('Retry-After',String(retry));fail(res,429,'Слишком много заявок с вашего адреса. Повторите через несколько минут');return true};
 app.get('/api/public/forms/:token',async (req,res)=>{const form=await db.prepare('SELECT title FROM lead_forms WHERE token=? AND active=1').get(req.params.token);if(!form)return fail(res,404,'Форма не найдена');res.json(form)});
-app.post('/api/public/forms/:token',async (req,res)=>{const form=await db.prepare('SELECT * FROM lead_forms WHERE token=? AND active=1').get(req.params.token);if(!form)return fail(res,404,'Форма не найдена');const key=req.ip+':'+form.id,now=Date.now(),recent=(publicFormRates.get(key)||[]).filter(t=>now-t<60000);if(recent.length>=20)return fail(res,429,'Слишком много отправок. Повторите позже');recent.push(now);prunePublicFormRates(now);publicFormRates.set(key,recent);if(req.body.website_hidden)return res.status(201).json({ok:true});const contactName=value(req.body.contact_name,255),companyName=value(req.body.company_name,255),phone=value(req.body.phone,80),email=value(req.body.email,254),title=value(req.body.title,255)||`Заявка: ${form.title}`;if((!contactName&&!companyName&&!phone&&!email)||(email&&!email.includes('@'))||!title)return fail(res,400,'Укажите контактные данные');const result=await db.prepare('INSERT INTO inbox_leads (pipeline_id,title,contact_name,company_name,phone,email,website,source,message) VALUES (?,?,?,?,?,?,?,?,?)').run(form.pipeline_id,title,contactName,companyName,phone,email.toLowerCase(),value(req.body.website,255),`Форма: ${form.title}`.slice(0,255),value(req.body.message,10000));res.status(201).json({ok:true,id:result.lastInsertRowid})});
+app.post('/api/public/forms/:token',async (req,res)=>{const form=await db.prepare('SELECT * FROM lead_forms WHERE token=? AND active=1').get(req.params.token);if(!form)return fail(res,404,'Форма не найдена');if(req.body.website_hidden){if(publicFormLimited(req,res))return;return res.status(201).json({ok:true})}const contactName=value(req.body.contact_name,255),companyName=value(req.body.company_name,255),phone=value(req.body.phone,80),email=value(req.body.email,254),title=value(req.body.title,255)||`Заявка: ${form.title}`;if((!contactName&&!companyName&&!phone&&!email)||(email&&!email.includes('@'))||!title)return fail(res,400,'Укажите контактные данные');if(publicFormLimited(req,res))return;const result=await db.prepare('INSERT INTO inbox_leads (pipeline_id,title,contact_name,company_name,phone,email,website,source,message) VALUES (?,?,?,?,?,?,?,?,?)').run(form.pipeline_id,title,contactName,companyName,phone,email.toLowerCase(),value(req.body.website,255),`Форма: ${form.title}`.slice(0,255),value(req.body.message,10000));res.status(201).json({ok:true,id:result.lastInsertRowid})});
 
 app.get('/api/entity-list',auth,async (req,res)=>{
   const kind=value(req.query.kind,20),page=Number(req.query.page||1),size=Number(req.query.page_size||50),q=value(req.query.q,120),owner=value(req.query.owner_id,30),tag=value(req.query.tag,120),preset=value(req.query.preset,20),createdFrom=value(req.query.created_from,10),createdTo=value(req.query.created_to,10);
@@ -983,7 +990,10 @@ app.use(express.static(resolve(root,'dist')));
 app.get('/{*path}',(req,res) => { if (isApiPath(req.path)) return fail(res,404,'Маршрут не найден'); res.sendFile(resolve(root,'dist/index.html')); });
 // Postgres rejects malformed or out-of-range values (ids, numbers) instead of silently matching nothing.
 const badInputCodes=new Set(['22P02','22003','22007','22008','22021','2201X','2201W']);
-app.use((err,_req,res,_next) => { if(badInputCodes.has(err?.code))return fail(res,400,'Проверьте введённые данные'); if(err?.status>=400&&err.status<500)return fail(res,err.status,'Неверный запрос'); console.error(err); fail(res,500,'Ошибка сервера'); });
+app.use((err,req,res,_next) => { if(badInputCodes.has(err?.code))return fail(res,400,'Проверьте введённые данные'); if(err?.status>=400&&err.status<500)return fail(res,err.status,'Неверный запрос');
+  // A query cancelled by statement_timeout, or no free database connection in time: one short line in the log, no stack.
+  if(err?.code==='57014'||/timeout exceeded when trying to connect/i.test(err?.message||'')){console.warn(`База не ответила вовремя: ${req.method} ${req.path}`);res.set('Retry-After','5');return fail(res,503,'Сервер занят, повторите через несколько секунд')}
+  console.error(err); fail(res,500,'Ошибка сервера'); });
 if (process.env.NODE_ENV !== 'test') { const port=Number(process.env.PORT)||3001,host=process.env.HOST||'127.0.0.1'; app.listen(port,host,()=>console.log(`OpenCRM: http://${host}:${port}`)); }
 // After a move from amoCRM: with AMO_BASE_URL and AMO_ACCESS_TOKEN set, the card history is loaded from
 // amoCRM once in the background (see syncHistoryFromAmo). A failed run is tried again an hour later.

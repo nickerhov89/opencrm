@@ -97,13 +97,16 @@ class Database {
   close() { return this.driver.close(); }
 }
 
-async function pgDriver(url) {
+// statementTimeoutMs > 0: Postgres cancels any single query running longer (error 57014), and a request
+// waits at most that long for a free pooled connection, so a few heavy requests cannot hang the CRM.
+async function pgDriver(url, { statementTimeoutMs = 0 } = {}) {
   const types = new pg.TypeOverrides();
   types.setTypeParser(20, parseBigint);
   types.setTypeParser(1700, parseBigint);
   types.setTypeParser(114, value => value);
   types.setTypeParser(3802, value => value);
-  const pool = new pg.Pool({ connectionString: url, types, max: Number(process.env.DATABASE_POOL_SIZE) || 10, options: '-c TimeZone=UTC' });
+  const limits = statementTimeoutMs > 0 ? { statement_timeout: statementTimeoutMs, connectionTimeoutMillis: statementTimeoutMs } : {};
+  const pool = new pg.Pool({ connectionString: url, types, max: Number(process.env.DATABASE_POOL_SIZE) || 10, options: '-c TimeZone=UTC', ...limits });
   pool.on('error', error => console.error('Postgres pool:', error.message));
   const wrap = client => ({
     query: (sql, params) => client.query(sql, params),
@@ -492,8 +495,8 @@ const defaultStages = [
   ['Успешно реализовано','#a9ddb1','won'], ['Закрыто и не реализовано','#e8b7b7','lost']
 ];
 
-export async function createDb({ url = process.env.DATABASE_URL, dataDir = process.env.PGLITE_DIR } = {}) {
-  const db = new Database(url ? await pgDriver(url) : await pgliteDriver(dataDir));
+export async function createDb({ url = process.env.DATABASE_URL, dataDir = process.env.PGLITE_DIR, statementTimeoutMs = 0 } = {}) {
+  const db = new Database(url ? await pgDriver(url, { statementTimeoutMs }) : await pgliteDriver(dataDir));
   // Several app instances may start at once against the same database: serialise schema setup.
   await db.transaction(async () => {
     await db.query('SELECT pg_advisory_xact_lock(4242001)');
