@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {existsSync,mkdtempSync,readdirSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {createLoginLimiter,totpCode,verifyTotp,base32Decode,base32Encode,normalizePermissions,fullPermissions} from '../server/security.js';
+import {createLoginLimiter,createRateLimiter,ipBucket,hashPassword,verifyPassword,totpCode,verifyTotp,base32Decode,base32Encode,normalizePermissions,fullPermissions} from '../server/security.js';
 
 test('TOTP matches RFC 6238 vectors and rejects replays',()=>{
   const secret=base32Encode(Buffer.from('12345678901234567890'));
@@ -29,6 +29,29 @@ test('login limiter separates IPs and accounts',()=>{
   assert.equal(limiter.blocked('9.9.9.9','victim@x',{trusted:true}),0,'a browser that signed in before is not locked out by the account cap');
   for(let i=0;i<3;i++)limiter.fail('8.8.8.8','victim@x');
   assert.ok(limiter.blocked('8.8.8.8','victim@x',{trusted:true})>0,'per IP+account limit still applies to trusted devices');
+});
+
+test('limits count an IPv6 /64 as one address and keep blocked counters under a flood',async()=>{
+  assert.equal(ipBucket('2001:db8:1:2:3:4:5:6'),'2001:db8:1:2::/64');
+  assert.equal(ipBucket('2001:0db8:0001:0002::9'),'2001:db8:1:2::/64');
+  assert.equal(ipBucket('2001:db8::1'),'2001:db8:0:0::/64');
+  assert.equal(ipBucket('::ffff:203.0.113.5'),'203.0.113.5');
+  assert.equal(ipBucket('203.0.113.5'),'203.0.113.5');
+  const limiter=createLoginLimiter({perIp:100,perAccountIp:3,perAccount:5,maxEntries:40});
+  for(let i=1;i<=3;i++)limiter.fail(`2001:db8:1:2::${i}`,'boss@x');
+  assert.ok(limiter.blocked('2001:db8:1:2::ffff','boss@x')>0,'rotating addresses inside one /64 does not reset the limit');
+  assert.equal(limiter.blocked('2001:db8:1:3::1','boss@x'),0,'another /64 is a different address');
+  for(let i=0;i<5;i++)limiter.fail(`198.51.100.${i}`,'victim@x');
+  for(let i=0;i<200;i++)limiter.fail(`203.0.113.${i%250}`,`spray${i}@x`);
+  assert.ok(limiter.blocked('192.0.2.1','victim@x')>0,'a flood of new entries does not wipe a counter that is at its limit');
+  const form=createRateLimiter({limit:5,windowMs:600000});
+  for(let i=0;i<5;i++)assert.equal(form.hit('a',1000+i),0);
+  assert.ok(form.hit('a',2000)>0);
+  assert.equal(form.hit('b',2000),0);
+  assert.equal(form.hit('a',1000+600000),0,'the window slides');
+  assert.ok(await verifyPassword('correct horse',await hashPassword('correct horse')));
+  assert.equal(await verifyPassword('wrong',await hashPassword('correct horse')),false);
+  assert.equal(await verifyPassword('x','broken'),false);
 });
 
 test('permission normalization fills gaps from the given base',()=>{

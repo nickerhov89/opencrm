@@ -1,10 +1,18 @@
 # OpenCRM + PostgreSQL. Put POSTGRES_PASSWORD (letters and digits) into .env next to this file:
 #   echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> .env
 x-database-url: &database-url postgresql://opencrm:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/opencrm
+# Container logs are rotated: at most 5 files of 10 MB per service, so a flood of requests or errors
+# cannot fill the disk (Docker keeps json-file logs without a size limit by default).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
   db:
     image: postgres:17-alpine
+    logging: *logging
     environment:
       POSTGRES_DB: opencrm
       POSTGRES_USER: opencrm
@@ -21,6 +29,7 @@ services:
 
   opencrm:
     build: .
+    logging: *logging
     image: opencrm:local
     depends_on:
       db:
@@ -47,6 +56,7 @@ services:
   # BACKUP_KEEP=0 keeps nothing here: a copy is deleted locally once S3 confirms it.
   backup:
     image: opencrm:local
+    logging: *logging
     depends_on:
       db:
         condition: service_healthy

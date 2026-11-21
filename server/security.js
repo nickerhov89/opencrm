@@ -1,4 +1,5 @@
-import { createHmac, timingSafeEqual, randomBytes } from 'node:crypto';
+import { createHmac, timingSafeEqual, randomBytes, scrypt } from 'node:crypto';
+import { isIP } from 'node:net';
 
 export const permissionEntities = ['deal', 'contact', 'company', 'task'];
 export const permissionActions = ['create', 'edit', 'delete', 'export'];
@@ -27,19 +28,34 @@ export const securityHeaders = (res, { https = false } = {}) => {
   if (https) res.set('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
 };
 
-// --- Login throttling: per IP, per account+IP and per account. The per-account cap stops distributed
-// guessing, but it is skipped for a browser that has already signed in to that account successfully
-// (a "trusted device" cookie), so attackers cannot lock the real owner out by failing on purpose.
-export function createLoginLimiter({ windowMs = 15 * 60 * 1000, perIp = 30, perAccountIp = 10, perAccount = 50, maxEntries = 20000 } = {}) {
+// The address a limit is counted for. An IPv6 client usually owns a whole /64, so every address in it
+// shares one bucket; IPv4-mapped IPv6 (::ffff:1.2.3.4) counts as the IPv4 address.
+export function ipBucket(raw) {
+  const ip = String(raw || '').trim().toLowerCase().replace(/%.*$/, '');
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(ip);
+  if (mapped) return mapped[1];
+  if (isIP(ip) !== 6) return ip.slice(0, 64);
+  const [head, tail = ''] = ip.split('::');
+  const left = head ? head.split(':') : [], right = ip.includes('::') && tail ? tail.split(':') : [];
+  const groups = ip.includes('::') ? [...left, ...Array(8 - left.length - right.length).fill('0'), ...right] : left;
+  return `${groups.slice(0, 4).map(group => (group.includes('.') ? '0' : group).replace(/^0+(?=.)/, '')).join(':')}::/64`;
+}
+
+// --- Login throttling: per IP, per account+IP and per account, in a 5-minute window. The per-account
+// cap stops distributed guessing, but it is skipped for a browser that has already signed in to that
+// account successfully (a "trusted device" cookie), so attackers cannot lock the real owner out by
+// failing on purpose. A flood of new entries cannot push out counters that are already at their limit.
+export function createLoginLimiter({ windowMs = 5 * 60 * 1000, perIp = 30, perAccountIp = 10, perAccount = 50, maxEntries = 100000 } = {}) {
   const buckets = new Map();
   const now = () => Date.now();
   const read = key => { const item = buckets.get(key); if (item && item.until > now()) return item; buckets.delete(key); return null; };
   const sweep = () => {
     if (buckets.size < maxEntries) return;
     for (const [key, item] of buckets) if (item.until <= now()) buckets.delete(key);
+    for (const [key, item] of buckets) { if (buckets.size < maxEntries) break; if (item.count < item.limit) buckets.delete(key); }
     while (buckets.size >= maxEntries) buckets.delete(buckets.keys().next().value);
   };
-  const keys = (ip, account) => [[`ip:${ip}`, perIp], [`pair:${ip}:${account}`, perAccountIp], [`acct:${account}`, perAccount]];
+  const keys = (rawIp, account) => { const ip = ipBucket(rawIp); return [[`ip:${ip}`, perIp], [`pair:${ip}:${account}`, perAccountIp], [`acct:${account}`, perAccount]]; };
   return {
     blocked(ip, account, { trusted = false } = {}) {
       let retry = 0;
@@ -51,11 +67,45 @@ export function createLoginLimiter({ windowMs = 15 * 60 * 1000, perIp = 30, perA
     },
     fail(ip, account) {
       sweep();
-      for (const [key] of keys(ip, account)) { const item = read(key); buckets.set(key, { count: (item?.count || 0) + 1, until: item?.until || now() + windowMs }); }
+      for (const [key, limit] of keys(ip, account)) { const item = read(key); buckets.set(key, { count: (item?.count || 0) + 1, until: item?.until || now() + windowMs, limit }); }
     },
-    success(ip, account) { buckets.delete(`pair:${ip}:${account}`); },
+    success(ip, account) { buckets.delete(`pair:${ipBucket(ip)}:${account}`); },
     clear() { buckets.clear(); }
   };
+}
+
+// --- Sliding-window limit of actions per key (public lead form): hit() counts the action and returns 0,
+// or the seconds to wait when the key already used its limit (a refused action is not counted).
+export function createRateLimiter({ windowMs, limit, maxEntries = 50000 }) {
+  const hits = new Map();
+  return {
+    hit(key, now = Date.now()) {
+      const recent = (hits.get(key) || []).filter(time => now - time < windowMs);
+      if (recent.length >= limit) { hits.set(key, recent); return Math.max(1, Math.ceil((recent[0] + windowMs - now) / 1000)); }
+      recent.push(now);
+      hits.delete(key); hits.set(key, recent);
+      if (hits.size > maxEntries) {
+        for (const [other, times] of hits) if (!times.some(time => now - time < windowMs)) hits.delete(other);
+        while (hits.size > maxEntries) hits.delete(hits.keys().next().value);
+      }
+      return 0;
+    },
+    clear() { hits.clear(); }
+  };
+}
+
+// --- Passwords: scrypt runs in the libuv thread pool, so checking a password does not stop the server
+// from answering other requests (scryptSync blocked the event loop for tens of milliseconds per login).
+const scryptAsync = (password, salt) => new Promise((resolve, reject) => scrypt(password, salt, 64, (error, key) => error ? reject(error) : resolve(key)));
+export async function hashPassword(password) {
+  const salt = randomBytes(16).toString('hex');
+  return `${salt}:${(await scryptAsync(password, salt)).toString('hex')}`;
+}
+export async function verifyPassword(password, stored) {
+  const [salt, hash] = String(stored || '').split(':');
+  if (!salt || !hash) return false;
+  const computed = await scryptAsync(password, salt), saved = Buffer.from(hash, 'hex');
+  return saved.length === computed.length && timingSafeEqual(saved, computed);
 }
 
 // --- TOTP (RFC 6238, SHA-1, 6 digits, 30 s) without third-party dependencies.

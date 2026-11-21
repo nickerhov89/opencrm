@@ -41,6 +41,27 @@ test('cross-origin writes are rejected and repeated login failures are throttled
     response=await post('/login',{email:'admin@example.test',password:'secure-test-password'});
     assert.equal(response.status,429);
     assert.ok(Number(response.headers.get('retry-after'))>0);
+
+    // A POST without a JSON body is a validation error, not a server error.
+    const empty=await fetch(`${base}/api/login`,{method:'POST'});
+    assert.equal(empty.status,401);
+
+    // Public lead form: five accepted submissions per address in ten minutes, across all forms;
+    // a submission refused for missing contacts is not counted, other addresses are not affected.
+    const formRes=await post('/pipelines/1/forms',{title:'Site'});
+    assert.equal(formRes.status,201);
+    const {token}=await formRes.json();
+    const secondToken=(await (await post('/pipelines/1/forms',{title:'Landing'})).json()).token;
+    const submit=(formToken,body,ip='198.51.100.20')=>fetch(`${base}/api/public/forms/${formToken}`,{method:'POST',headers:{'Content-Type':'application/json','X-Forwarded-For':ip},body:body===undefined?undefined:JSON.stringify(body)});
+    assert.equal((await fetch(`${base}/api/public/forms/${token}`,{method:'POST'})).status,400,'empty submission is rejected without a server error');
+    for(let index=0;index<3;index++)assert.equal((await submit(token,{message:'no contacts'})).status,400);
+    for(let index=0;index<5;index++)assert.equal((await submit(index%2?secondToken:token,{contact_name:`Lead ${index}`,phone:'+70000000000'})).status,201);
+    const limited=await submit(secondToken,{contact_name:'Lead 6',phone:'+70000000000'});
+    assert.equal(limited.status,429);
+    assert.ok(Number(limited.headers.get('retry-after'))>0);
+    assert.equal((await submit(token,{contact_name:'Bot',website_hidden:'x'})).status,429,'honeypot submissions share the limit');
+    assert.equal((await submit(token,{contact_name:'Other visitor',phone:'+70000000001'},'198.51.100.21')).status,201);
+    assert.equal((await db.prepare("SELECT COUNT(*) n FROM inbox_leads WHERE source LIKE 'Форма:%'").get()).n,6);
   }finally{
     server.closeAllConnections();
     await new Promise(resolve=>server.close(resolve));
