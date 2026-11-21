@@ -415,6 +415,7 @@ export function registerPlugins(app, db, {auth, admin, audit = async () => {}, u
       if (!uploadEnabled()) throw new PluginError('Загрузка плагинов через интерфейс выключена (OPENCRM_PLUGIN_UPLOAD=0). Установите плагин на сервере: npm run plugin -- install <файл.zip>', 403);
       if (!Buffer.isBuffer(req.body) || !req.body.length) bad('Пришлите ZIP-архив плагина');
       const pkg = packageFiles(readZip(req.body));
+      if (req.query.expect && pkg.manifest.id !== req.query.expect) bad(`В архиве другой плагин («${pkg.manifest.name}», ${pkg.manifest.id}), а не ${req.query.expect}. Для установки нового плагина используйте кнопку «Загрузить плагин» в списке.`);
       const before = await db.prepare('SELECT enabled,version FROM plugins WHERE id=?').get(pkg.manifest.id);
       if (runtimes.has(pkg.manifest.id)) await deactivate(pkg.manifest.id);
       writePackage(dir, pkg);

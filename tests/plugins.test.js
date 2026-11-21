@@ -159,7 +159,10 @@ test('плагины: установка, настройки, приём зая�
 
     // An update keeps settings and restarts the plugin.
     const updated = folder('hello-world').map(file => file.name === 'plugin.json' ? {...file, data: Buffer.from(file.data.toString().replace('"1.0.0"', '"1.1.0"'))} : file);
-    state = await request('/admin/plugins', 'POST', writeZip(updated), 200, {'Content-Type': 'application/zip'});
+    const wrong = await request('/admin/plugins?expect=tilda-forms', 'POST', writeZip(updated), 400, {'Content-Type': 'application/zip'});
+    assert.match(wrong.error, /другой плагин/, 'кнопка «Обновить» на странице плагина не ставит чужой архив');
+    assert.equal((await request('/admin/plugins')).plugins.find(item => item.id === 'hello-world').version, '1.0.0');
+    state = await request('/admin/plugins?expect=hello-world', 'POST', writeZip(updated), 200, {'Content-Type': 'application/zip'});
     assert.equal(state.version, '1.1.0');
     assert.equal(state.status, 'active');
     assert.equal(state.settings.logStages, true);

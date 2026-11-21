@@ -4,7 +4,9 @@
 .plugin-notice{display:flex;justify-content:space-between;gap:12px;align-items:center;background:#eef7ec;border:1px solid #cfe5c9;color:#3f6935;font-size:12px;padding:10px 14px;margin-bottom:16px}
 .plugin-notice button{border:0;background:none;color:inherit;font-size:16px;line-height:1}
 .plugin-head{display:flex;align-items:center;gap:14px;padding:18px 22px}
-.plugin-icon{width:38px;height:38px;flex:0 0 38px;border-radius:8px;display:grid;place-items:center;background:#edf3fa;color:#3f78b5}
+.plugin-icon{--plugin-hue:212;width:38px;height:38px;flex:0 0 38px;border-radius:8px;display:grid;place-items:center;background:hsl(var(--plugin-hue) 60% 50% / .13);color:hsl(var(--plugin-hue) 48% 42%)}
+.plugin-head .plugin-icon{width:46px;height:46px;flex-basis:46px;border-radius:10px}
+:root[data-theme=dark] .plugin-icon{background:hsl(var(--plugin-hue) 60% 60% / .16);color:hsl(var(--plugin-hue) 65% 72%)}
 .plugin-title{flex:1;min-width:0}
 .plugin-title h3{margin:0;font-size:14px;color:#3e4a53}
 .plugin-title h3 small{font-weight:400;color:#9aa4ab;font-size:11px;margin-left:4px}
@@ -35,9 +37,6 @@ p.plugin-error{margin:0}
 .plugin-check{display:flex;gap:8px;align-items:center;font-size:12px;color:#4f5a63;padding-left:222px}
 .plugin-actions{display:flex;justify-content:flex-end}
 .plugin-actions .blue-btn:disabled{opacity:.55}
-.plugin-footer{border-top:1px solid #eef0f1;padding:10px 22px;display:flex;justify-content:space-between}
-.plugin-footer button{border:0;background:none;color:#4f85bd;font-size:11px;display:flex;gap:5px;align-items:center}
-.plugin-footer .plugin-delete{color:#b0594f}
 .plugin-logs{border-top:1px solid #eef0f1;max-height:260px;overflow:auto;padding:8px 22px;font-size:11px;font-family:ui-monospace,Consolas,monospace}
 .plugin-logs div{display:flex;gap:12px;padding:3px 0;color:#4f5a63}
 .plugin-logs div.error{color:#a4473d}
@@ -65,8 +64,27 @@ p.plugin-error{margin:0}
   .plugin-toolbar .blue-btn{font-size:0}
   .plugin-endpoints div,.plugin-field{grid-template-columns:1fr;gap:5px}
   .plugin-settings>div>small,.plugin-check{padding-left:0}
-  .plugin-settings,.plugin-endpoints,.plugin-footer,.plugin-logs{padding-left:16px;padding-right:16px}
+  .plugin-settings,.plugin-endpoints,.plugin-logs,.plugin-detail-actions,.plugin-section-title,.plugin-description{padding-left:16px;padding-right:16px}
   .plugin-page-head{padding:0 14px}
   .plugin-page-head .hamburger{display:block}
   .plugin-page>.plugin-card,.plugin-page>div:not(.plugin-page-head){margin:15px}
 }
+.plugin-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px}
+.plugin-tile{display:flex;flex-direction:column;align-items:stretch;gap:6px;min-height:168px;padding:16px 18px;text-align:left;background:#fff;border:1px solid #dfe2e5;border-radius:4px;color:#44525d;cursor:pointer;transition:border-color .15s,box-shadow .15s}
+.plugin-tile:hover{border-color:#5b95d6;box-shadow:0 2px 8px #1f3b5a14}
+.plugin-tile:focus-visible{outline:2px solid #5b95d6;outline-offset:2px}
+.plugin-tile-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px}
+.plugin-tile strong{font-size:14px;color:#3e4a53}
+.plugin-tile p{margin:0;flex:1;font-size:12px;line-height:1.45;color:#6b777f;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.plugin-tile small{font-size:11px;color:#a0a9b0}
+.plugin-search{display:flex;align-items:center;gap:8px;max-width:340px;margin-bottom:14px;padding:0 10px;height:34px;border:1px solid #cbd2d7;background:#fff;color:#9aa3aa}
+.plugin-search input{flex:1;min-width:0;border:0;outline:0;background:none;font-size:12px;color:#40505d}
+.plugin-back{display:inline-flex;align-items:center;gap:6px;margin-bottom:14px;border:0;background:none;padding:4px 0;font-size:13px;color:#4f85bd;cursor:pointer}
+.plugin-back:hover{text-decoration:underline}
+.plugin-description{margin:0;padding:0 22px 14px;font-size:13px;line-height:1.5;color:#5f6b74;white-space:pre-line}
+.plugin-detail-actions{display:flex;gap:8px;flex-wrap:wrap;padding:12px 22px;border-top:1px solid #eef0f1}
+.plugin-detail-actions .outline-btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;font-size:12px}
+.plugin-detail-actions .plugin-delete{color:#b0594f}
+.plugin-section-title{margin:0;padding:14px 22px 0;font-size:11px;letter-spacing:.3px;text-transform:uppercase;color:#8d979e}
+.plugin-details .plugin-endpoints,.plugin-details .plugin-settings,.plugin-details .plugin-logs{border-top:0}
+@media(max-width:760px){.plugin-grid{grid-template-columns:1fr}.plugin-tile{min-height:0}.plugin-head{flex-wrap:wrap}}
