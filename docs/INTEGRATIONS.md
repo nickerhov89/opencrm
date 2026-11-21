@@ -85,13 +85,14 @@ Every pipeline has working stages plus exactly one won and one lost stage; missi
 - `mode: "any"` (default) — between any stages of the pipeline;
 - `mode: "restricted"` — only along the listed pairs `from_stage_id → to_stage_id` inside the pipeline;
 - `lock_deals: true` — deals of this pipeline cannot be moved to another pipeline.
+- `rules_for_admins: true` — administrators follow the rules in the web interface too (by default they are exempt).
 
 ```json
 PUT /api/v1/pipelines/7/transitions
 {"mode": "restricted", "lock_deals": true, "transitions": {"31": [32], "32": [33, 36], "33": [35, 36]}}
 ```
 
-`transitions` is either a map `{"from stage ID": [to stage IDs]}` or a list `[{"from_stage_id": 31, "to_stage_id": 32}]`; sending it replaces all pairs of the pipeline. Omit it to change only `mode` or `lock_deals`. A new stage gets no pairs automatically. The same rules are edited in the interface under the pipeline settings → **Правила переходов**. They apply to employees and to every API key; administrators are exempt in the interface. A forbidden move returns HTTP 403 with the reason. `GET /api/v1/deals/:id/allowed-stages` returns the stage IDs the deal may move to now.
+`transitions` is either a map `{"from stage ID": [to stage IDs]}` or a list `[{"from_stage_id": 31, "to_stage_id": 32}]`; sending it replaces all pairs of the pipeline. Omit it to change only `mode`, `lock_deals` or `rules_for_admins`. A refused move answers `403` with the stages the deal may go to. A new stage gets no pairs automatically. The same rules are edited in the interface under the pipeline settings → **Правила переходов**. They apply to employees and to every API key; administrators are exempt in the interface. A forbidden move returns HTTP 403 with the reason. `GET /api/v1/deals/:id/allowed-stages` returns the stage IDs the deal may move to now.
 
 ## Deals
 
