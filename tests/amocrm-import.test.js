@@ -350,7 +350,8 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
         assert.equal(u.searchParams.get('filter[created_at][from]'), '1', 'amoCRM refuses a range without its start');
         untilSeen.add(u.searchParams.get('filter[created_at][to]'));
         if (page === failPage) return {status: 403, body: ''};
-        const chunk = source.events_history.slice((page - 1) * 7, page * 7);
+        // amoCRM sometimes returns an event twice in one read; page 2 repeats its first event.
+        const chunk = page === 2 ? [source.events_history[7], ...source.events_history.slice(7, 14)] : source.events_history.slice((page - 1) * 7, page * 7);
         return {status: 200, body: JSON.stringify({_embedded: {events: chunk}, _links: page * 7 < source.events_history.length ? {next: {href: 'x'}} : {}})};
       }
       if (lists[u.pathname]) return {status: 200, body: JSON.stringify(page === 1 ? {_embedded: {[lists[u.pathname][0]]: lists[u.pathname][1]}} : {})};

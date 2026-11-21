@@ -713,10 +713,11 @@ export async function syncHistoryFromAmo(db, client, {log = console.log, paralle
   while (!done) {
     const pages = Array.from({length: parallel}, (_, i) => progress.page + i);
     const results = await Promise.all(pages.map(page => client.request('/api/v4/events', params(page))));
-    const events = [];
+    // amoCRM paging is not perfectly stable: an event may show up on two neighbouring pages.
+    const events = [], seen = new Set();
     for (const data of results) {
       const chunk = data?._embedded?.events || [];
-      events.push(...chunk);
+      for (const event of chunk) if (!seen.has(event.id)) { seen.add(event.id); events.push(event); }
       if (!chunk.length || !data._links?.next) { done = true; break; }
     }
     const rows = {activity: [], entity_activity: []};
