@@ -4,7 +4,7 @@
 
 - Connected mailboxes (Settings → Mail, admins): IMAP/SMTP with an app password, or Google Workspace through a service account with domain-wide delegation (XOAUTH2). The connection is checked before saving; passwords and keys are encrypted with `OPENCRM_SECRET_KEY` or a key file outside the backups.
 - Sync every two minutes by UID (Gmail: All Mail; others: INBOX and Sent), 60 days of history on connect, duplicates merged by Message-ID, drafts skipped. Text (HTML converted), headers and the list of attachments are kept.
-- Letters link to deals by thread (In-Reply-To/References) or by the address of a contact or company (open deal first). Unlinked letters are kept, checked again on every sync and can be linked by hand.
+- Letters link to deals by thread (In-Reply-To/References), by the address of a contact or company (open deal first), or by the same subject with the same correspondent when only one deal fits. Inside a deal a letter is incoming when it comes from the client's address or domain, otherwise outgoing. Unlinked letters are kept, checked again on every sync and can be linked by hand.
 - The deal feed shows letters with notes; «Ответить» and «Ответить всем» send over SMTP of the same mailbox with In-Reply-To, References and the unchanged «Re:» subject, and the sent letter appears in the feed at once.
 - API: `GET /api/v1/deals/:id/emails`, `GET /api/v1/emails`, new key scope `emails:read`. See docs/MAIL.md.
 
