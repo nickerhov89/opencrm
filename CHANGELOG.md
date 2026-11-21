@@ -7,6 +7,7 @@
 - Letters link to deals by thread (In-Reply-To/References), by the address of a contact or company (open deal first), or by the same subject with the same correspondent when only one deal fits. Inside a deal a letter is incoming when it comes from the client's address or domain, otherwise outgoing. Unlinked letters are kept, checked again on every sync and can be linked by hand.
 - The deal feed shows letters with notes; «Ответить» and «Ответить всем» send over SMTP of the same mailbox with In-Reply-To, References and the unchanged «Re:» subject, and the sent letter appears in the feed at once.
 - API: `GET /api/v1/deals/:id/emails`, `GET /api/v1/emails`, new key scope `emails:read`. See docs/MAIL.md.
+- `scripts/mail-add.mjs` connects a mailbox from the server with the key or password read from a file, never printed.
 
 ## Unreleased — data for reports and the amoCRM move
 
