@@ -6,6 +6,7 @@ import http from 'node:http';
 import https from 'node:https';
 import tls from 'node:tls';
 import {fullPermissions,defaultMemberPermissions} from '../server/security.js';
+import {taskTypes} from '../src/task-types.js';
 
 // ---------------------------------------------------------------- export
 
@@ -315,7 +316,8 @@ export function transform(dump, existing = {users: [], maxStageId: 0}) {
     else if (task.entity_type === 'contacts' && contactIds.has(task.entity_id)) link.contact_id = task.entity_id;
     else if (task.entity_type === 'companies' && companyIds.has(task.entity_id)) link.company_id = task.entity_id;
     else if (task.entity_id) warn('Задачи без найденной записи перенесены без привязки', task.id);
-    const type = presetTaskTypes[task.task_type_id] || clip(customTypes.get(task.task_type_id) || 'Связаться', 60);
+    const custom = customTypes.get(task.task_type_id);
+    const type = presetTaskTypes[task.task_type_id] || taskTypes.find(name => name.toLowerCase() === String(custom || '').toLowerCase()) || clip(custom || 'Связаться', 60);
     const text = String(task.text || '').trim();
     const title = clip(text.split('\n')[0].trim() || type, 500);
     const due = unix(task.complete_till);

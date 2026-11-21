@@ -11,7 +11,7 @@ const statuses = (pipelineId, list) => list.map(([id, name, sort, type = 0]) => 
 
 function fixture() {
   return {
-    account: {id: 1, name: 'Agency', subdomain: 'agency', timezone: 'Europe/Moscow', task_types: [{id: 1, name: 'Связаться'}, {id: 2, name: 'Встреча'}, {id: 3001, name: 'Аудит'}]},
+    account: {id: 1, name: 'Agency', subdomain: 'agency', timezone: 'Europe/Moscow', task_types: [{id: 1, name: 'Связаться'}, {id: 2, name: 'Встреча'}, {id: 3001, name: 'Аудит'}, {id: 3002, name: 'Пинг'}]},
     pipelines: [
       {id: 7001, name: 'Первичка', sort: 1, _embedded: {statuses: statuses(7001, [[142, 'Успешно', 10000], [143, 'Отказ', 11000], [5001, 'Неразобранное', 10, 1], [5002, 'Квалификация', 20], [5003, 'КП', 30]])}},
       {id: 7002, name: 'Продления', sort: 2, _embedded: {statuses: statuses(7002, [[142, 'Продлили', 10000], [143, 'Не продлили', 11000], [5101, 'Неразобранное', 10, 1], [5102, 'Переговоры', 20]])}}
@@ -61,7 +61,7 @@ function fixture() {
     tasks: [
       {id: 61000001, entity_type: 'leads', entity_id: 21000001, task_type_id: 2, text: 'Встреча с клиентом\nОбсудить смету и сроки', complete_till: t('2025-03-12T08:00:00Z'), duration: 3600, is_completed: true, result: {text: 'Договорились'}, responsible_user_id: 9001, created_at: t('2025-03-10T09:10:00Z'), updated_at: t('2025-03-12T09:00:00Z')},
       {id: 61000002, entity_type: 'contacts', entity_id: 4001, task_type_id: 3001, text: 'Позвонить', complete_till: t('2025-03-13T20:59:00Z'), duration: 0, is_completed: false, responsible_user_id: 9002, created_at: t('2025-03-10T09:10:00Z'), updated_at: t('2025-03-10T09:10:00Z')},
-      {id: 61000003, entity_type: 'leads', entity_id: 99, task_type_id: 1, text: '', complete_till: t('2025-03-13T10:00:00Z'), is_completed: false, responsible_user_id: 9001, created_at: t('2025-03-10T09:10:00Z'), updated_at: t('2025-03-10T09:10:00Z')}
+      {id: 61000003, entity_type: 'leads', entity_id: 99, task_type_id: 3002, text: '', complete_till: t('2025-03-13T10:00:00Z'), is_completed: false, responsible_user_id: 9001, created_at: t('2025-03-10T09:10:00Z'), updated_at: t('2025-03-10T09:10:00Z')}
     ],
     notes_leads: [
       {id: 81000001, entity_id: 21000001, note_type: 'common', params: {text: 'Клиент просит скидку'}, created_by: 9001, created_at: t('2025-03-11T09:00:00Z'), updated_at: t('2025-03-11T09:00:00Z')},
@@ -219,7 +219,8 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
     assert.equal(call2.all_day, true);
     assert.equal(call2.contact_id, 4001);
     const orphan = await call('/v1/tasks/61000003', {key});
-    assert.equal(orphan.title, 'Связаться');
+    assert.equal(orphan.title, 'пинг');
+    assert.equal(orphan.task_type, 'пинг', 'custom types matching a preset use its spelling');
     assert.equal(orphan.deal_id, null);
 
     // Notes keep IDs; calls become readable text.
