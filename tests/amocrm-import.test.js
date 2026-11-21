@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync} from 'node:fs';
+import {mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {amoClient, exportAccount, readDump, loadDump} from '../scripts/amocrm-lib.mjs';
@@ -66,7 +66,10 @@ function fixture() {
     notes_leads: [
       {id: 81000001, entity_id: 21000001, note_type: 'common', params: {text: 'Клиент просит скидку'}, created_by: 9001, created_at: t('2025-03-11T09:00:00Z'), updated_at: t('2025-03-11T09:00:00Z')},
       {id: 81000002, entity_id: 21000001, note_type: 'call_in', params: {phone: '+79001111111', duration: 125, link: 'https://records.test/1.mp3', call_result: 'Поговорили'}, created_by: 9001, created_at: t('2025-03-11T10:00:00Z'), updated_at: t('2025-03-11T10:00:00Z')},
-      {id: 81000003, entity_id: 99, note_type: 'common', params: {text: 'чужая'}, created_by: 9001, created_at: t('2025-03-11T10:00:00Z')}
+      {id: 81000003, entity_id: 99, note_type: 'common', params: {text: 'чужая'}, created_by: 9001, created_at: t('2025-03-11T10:00:00Z')},
+      {id: 81000004, entity_id: 21000001, note_type: 'attachment', params: {file_uuid: 'u1', version_uuid: 'v1', file_name: 'smeta.pdf', original_name: 'Смета.pdf', is_drive_attachment: true}, created_by: 9001, created_at: t('2025-03-12T10:00:00Z')},
+      {id: 81000005, entity_id: 21000001, note_type: 'amomail_message', params: {income: true, from: {name: 'Иван', email: 'ivan@romashka.test'}, to: {name: 'Анна', email: 'anna@agency.test'}, subject: 'Смета', content_summary: 'Посмотрите, пожалуйста', attach_cnt: 1}, created_by: 0, created_at: t('2025-03-12T11:00:00Z')},
+      {id: 81000006, entity_id: 21000001, note_type: 'extended_service_message', params: {service: {name: 'Tilda'}, text: 'Заявка с сайта'}, created_by: 0, created_at: t('2025-03-12T12:00:00Z')}
     ],
     notes_contacts: [{id: 82000001, entity_id: 4001, note_type: 'common', params: {text: 'Любит звонки после обеда'}, created_by: 9002, created_at: t('2024-01-07T10:00:00Z'), updated_at: t('2024-01-07T10:00:00Z')}],
     notes_companies: [{id: 83000001, entity_id: 3001, note_type: 'service_message', params: {service: 'Робот', text: 'Создана из формы'}, created_by: 0, created_at: t('2024-01-05T10:00:00Z')}],
@@ -86,9 +89,14 @@ test('amoCRM client pages through lists, retries and exports to files', async ()
   const get = async (url, headers) => {
     const u = new URL(url);
     calls.push(u.pathname + u.search);
-    assert.equal(headers.Authorization, 'Bearer secret-token');
+    if (u.hostname !== 'storage.example.test') assert.equal(headers.Authorization, 'Bearer secret-token');
     if (u.pathname === '/api/v4/leads' && failures-- > 0) return {status: 429, body: ''};
-    if (u.pathname === '/api/v4/account') return {status: 200, body: JSON.stringify({id: 1, name: 'A', subdomain: 'a', datetime_settings: {timezone: 'Europe/Moscow'}, _embedded: {task_types: []}})};
+    if (u.pathname === '/api/v4/account') return {status: 200, body: JSON.stringify({id: 1, name: 'A', subdomain: 'a', drive_url: 'https://drive-b.amocrm.ru', datetime_settings: {timezone: 'Europe/Moscow'}, _embedded: {task_types: []}})};
+    if (u.pathname === '/api/v4/leads/notes') return {status: 200, body: JSON.stringify({_embedded: {notes: [{id: 5, entity_id: 1, note_type: 'attachment', params: {file_uuid: 'u1', version_uuid: 'v1', file_name: 'a.pdf', original_name: 'Смета.pdf'}}, {id: 6, entity_id: 1, note_type: 'attachment', params: {file_uuid: 'u2', version_uuid: 'v2', file_name: 'b.txt', original_name: 'b.txt'}}]}})};
+    if (u.hostname === 'drive-b.amocrm.ru' && u.pathname === '/v1.0/files/u1') return {status: 200, body: JSON.stringify({_links: {download: {href: 'https://drive-b.amocrm.ru/download/u1/v1/a.pdf'}}, metadata: {mime_type: 'application/pdf'}})};
+    if (u.hostname === 'drive-b.amocrm.ru' && u.pathname === '/download/u1/v1/a.pdf') return {status: 302, headers: {location: 'https://storage.example.test/blob/1'}, body: ''};
+    if (u.hostname === 'storage.example.test') { assert.equal(headers.Authorization, undefined, 'the token stays on amoCRM hosts'); return {status: 200, raw: Buffer.from('%PDF-1'), headers: {'content-type': 'application/octet-stream'}}; }
+    if (u.hostname === 'drive-b.amocrm.ru') return {status: 404, body: ''};
     if (u.pathname === '/api/v4/leads/pipelines') return {status: 200, body: JSON.stringify({_embedded: {pipelines: fixture().pipelines}})};
     const list = pages[u.pathname];
     if (!list) return {status: 204, body: ''};
@@ -101,14 +109,18 @@ test('amoCRM client pages through lists, retries and exports to files', async ()
   const counts = await exportAccount({client, dir, log: () => {}});
   assert.equal(counts.leads, 3);
   assert.equal(counts.contacts, 0);
+  assert.equal(counts.files, 1);
+  assert.equal(readFileSync(join(dir, 'files', '5'), 'utf8'), '%PDF-1');
+  assert.ok(calls.includes('/download/u2/v2/b.txt'), 'without a download link the known Drive path is tried');
   assert.ok(calls.includes('/api/v4/leads?with=contacts%2Closs_reason&limit=250&page=2'));
   assert.ok(calls.some(c => c.startsWith('/api/v4/events?filter%5Btype%5D=lead_status_changed&limit=100')));
   const dump = await readDump(dir);
   assert.deepEqual(dump.leads.map(l => l.id), [1, 2, 3]);
+  assert.deepEqual(dump.files.map(f => [f.note_id, f.name, f.mime_type, f.size, !!f.error]), [[5, 'Смета.pdf', 'application/pdf', 6, false], [6, 'b.txt', undefined, undefined, true]]);
   // A second run downloads only the account and pipelines again.
   calls.length = 0;
   await exportAccount({client, dir, log: () => {}});
-  assert.deepEqual(calls.map(c => c.split('?')[0]), ['/api/v4/account', '/api/v4/leads/pipelines']);
+  assert.deepEqual(calls.map(c => c.split('?')[0]), ['/api/v4/account', '/api/v4/leads/pipelines', '/v1.0/files/u2', '/download/u2/v2/b.txt'], 'only the failed file is tried again');
   assert.equal(dump.account.timezone, 'Europe/Moscow');
   assert.throws(() => amoClient({baseUrl: 'http://agency.amocrm.ru', token: 'x'}), /https/);
 });
@@ -138,16 +150,27 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
     await call('/integrations/webhooks', {method: 'POST', body: {name: 'Hook', url: 'http://127.0.0.1:9/hook', events: ['deal.created', 'deal.updated', 'contact.created', 'task.created']}, status: 201});
     const admin = await one('SELECT id FROM users WHERE email=$1', 'admin@example.test');
     const quiet = () => {};
+    const uploads = process.env.UPLOAD_DIR;
+    const filePath = join(directory, 'smeta.bin');
+    writeFileSync(filePath, 'PDF-CONTENT');
+    const withFiles = () => ({...fixture(), files: [
+      {note_id: 81000004, entity: 'leads', entity_id: 21000001, created_by: 9001, created_at: t('2025-03-12T10:00:00Z'), name: 'Смета.pdf', mime_type: 'application/pdf', size: 11, path: filePath},
+      {note_id: 81000007, entity: 'leads', entity_id: 21000001, name: 'lost.doc', error: 'HTTP 404'}
+    ]});
+    const uploaded = () => existsSync(uploads) ? readdirSync(uploads) : [];
 
     // Dry run: full report, nothing stays.
-    const dry = await loadDump(db, fixture(), {dryRun: true, log: quiet});
+    const dry = await loadDump(db, withFiles(), {dryRun: true, log: quiet});
+    assert.equal(dry.counts.attachments, 1);
+    assert.equal(dry.attachment_bytes, 11);
+    assert.deepEqual(uploaded(), [], 'a dry run copies no files');
     assert.equal(dry.dry_run, true);
     assert.equal(dry.counts.deals, 3);
     assert.equal(Number((await one('SELECT COUNT(*) n FROM deals')).n), 0);
     assert.equal(Number((await one('SELECT COUNT(*) n FROM pipelines WHERE id=7001')).n), 0);
 
-    const report = await loadDump(db, fixture(), {log: quiet});
-    assert.deepEqual(report.counts, {users: 2, pipelines: 2, stages: 9, custom_fields: 8, companies: 1, contacts: 2, deals: 3, deal_contacts: 3, custom_field_values: 9, tasks: 3, notes: 2, entity_notes: 2, deal_stage_changes: 6});
+    const report = await loadDump(db, withFiles(), {log: quiet});
+    assert.deepEqual(report.counts, {users: 2, pipelines: 2, stages: 9, custom_fields: 8, companies: 1, contacts: 2, deals: 3, deal_contacts: 3, custom_field_values: 9, tasks: 3, notes: 5, entity_notes: 2, deal_stage_changes: 6, attachments: 1});
     assert.deepEqual(report.rekeyed_users, [{email: 'admin@example.test', from: admin.id, to: 9003}]);
     assert.deepEqual(report.merged_users, []);
     assert.equal(Number((await one('SELECT COUNT(*) n FROM users WHERE email=$1', 'admin@example.test')).n), 1);
@@ -160,6 +183,13 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
     assert.ok(report.warnings['Значения удалённых полей пропущены']);
     assert.ok(report.warnings['Варианты списков добавлены из значений']);
     assert.equal(report.warnings['Задачи без найденной записи перенесены без привязки'].count, 1);
+    assert.equal(report.warnings['Файлы, которые не удалось скачать'].count, 1);
+    const attachment = await one("SELECT id,entity_type,entity_id,user_id,filename,mime_type,byte_size,stored_name,created_at FROM attachments");
+    assert.deepEqual({...attachment, id: undefined, stored_name: undefined, entity_id: Number(attachment.entity_id), user_id: Number(attachment.user_id), byte_size: Number(attachment.byte_size)}, {id: undefined, stored_name: undefined, entity_type: 'deal', entity_id: 21000001, user_id: 9001, filename: 'Смета.pdf', mime_type: 'application/pdf', byte_size: 11, created_at: '2025-03-12 10:00:00'});
+    assert.deepEqual(uploaded(), [attachment.stored_name]);
+    const downloaded = await fetch(`${base}/attachments/${attachment.id}/download`, {headers: {Cookie: cookie}});
+    assert.equal(downloaded.status, 200);
+    assert.equal(await downloaded.text(), 'PDF-CONTENT');
 
     // Users: amo IDs, no login, inactive disabled; an existing e-mail reuses that account.
     const anna = await one('SELECT id,email,role,password_hash,disabled_at FROM users WHERE id=9001');
@@ -232,7 +262,10 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
     // Notes keep IDs; calls become readable text.
     const notes = await call('/v1/deals/21000001/notes', {key});
     const list = notes.items;
-    assert.deepEqual(list.map(n => n.id).sort(), [81000001, 81000002]);
+    assert.deepEqual(list.map(n => n.id).sort(), [81000001, 81000002, 81000004, 81000005, 81000006]);
+    assert.equal(list.find(n => n.id === 81000005).body, 'Входящее письмо\nОт: Иван <ivan@romashka.test>\nКому: Анна <anna@agency.test>\nТема: Смета\nВложений: 1\n\nПосмотрите, пожалуйста');
+    assert.equal(list.find(n => n.id === 81000006).body, 'Tilda: Заявка с сайта');
+    assert.equal(list.find(n => n.id === 81000004).body, 'Файл: Смета.pdf');
     assert.match(list.find(n => n.id === 81000002).body, /Входящий звонок[\s\S]*Длительность: 2:05[\s\S]*https:\/\/records\.test\/1\.mp3/);
     assert.equal((await one('SELECT body FROM entity_notes WHERE id=83000001')).body, 'Робот: Создана из формы');
 
@@ -262,7 +295,12 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
 
     // A second load needs --replace; with it the data is replaced, users and keys stay.
     await assert.rejects(loadDump(db, fixture(), {log: quiet}), /--replace/);
-    const again = await loadDump(db, fixture(), {replace: true, log: quiet});
+    const firstStored = attachment.stored_name;
+    const again = await loadDump(db, withFiles(), {replace: true, log: quiet});
+    assert.equal(again.counts.attachments, 1);
+    const storedNow = (await one('SELECT stored_name FROM attachments')).stored_name;
+    assert.notEqual(storedNow, firstStored);
+    assert.deepEqual(uploaded(), [storedNow], '--replace removes the files of the replaced records');
     assert.equal(again.counts.users, 0, 'users from the first load are reused by e-mail');
     assert.equal(Number((await one('SELECT COUNT(*) n FROM deals')).n), 3);
     assert.equal(Number((await one('SELECT COUNT(*) n FROM deal_stage_changes')).n), 6);

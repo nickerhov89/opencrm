@@ -1,8 +1,8 @@
 // One-time move of an amoCRM account into OpenCRM with the amoCRM IDs. See docs/AMOCRM_IMPORT.md.
 //
 //   node scripts/amocrm-import.mjs export [--dir DIR] [--force]
-//       Downloads users, pipelines, fields, companies, contacts, deals, tasks, notes and the stage
-//       history through the amoCRM API v4 into JSON files in DIR (default data/amocrm-export).
+//       Downloads users, pipelines, fields, companies, contacts, deals, tasks, notes, files and the
+//       stage history through the amoCRM API v4 into JSON files in DIR (default data/amocrm-export).
 //       Needs AMO_BASE_URL (https://<subdomain>.amocrm.ru) and AMO_ACCESS_TOKEN (long-lived token);
 //       AMO_PROXY_URL (http://[user:pass@]host:port) sends the requests through an HTTP CONNECT proxy.
 //       AMO_RPS (default 3, at most 7) limits requests per second: the token's limit is shared with
@@ -12,7 +12,7 @@
 //   node scripts/amocrm-import.mjs load [--dir DIR] [--dry-run] [--replace] [--keep-default-pipeline]
 //       Loads the files into the database of DATABASE_URL in one transaction. --dry-run writes,
 //       checks and rolls everything back, printing the same report. --replace first removes deals,
-//       contacts, companies, tasks, notes, custom fields and the pipelines with amoCRM IDs.
+//       contacts, companies, tasks, notes, custom fields, attachments and the pipelines with amoCRM IDs.
 //       The report is also saved as DIR/load-report.json.
 import {writeFile} from 'node:fs/promises';
 import {join, resolve} from 'node:path';

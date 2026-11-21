@@ -12,7 +12,7 @@ Run the commands in the app container (`docker compose -p opencrm exec opencrm .
    docker compose -p opencrm exec -e AMO_BASE_URL=https://<subdomain>.amocrm.ru -e AMO_ACCESS_TOKEN=<token> opencrm node scripts/amocrm-import.mjs export
    ```
 
-   The files go to `data/amocrm-export` (`--dir` changes it; in the container this is the `opencrm_data` volume, which is not part of backups). `AMO_PROXY_URL=http://[user:password@]host:port` sends the requests through an HTTP CONNECT proxy; `AMO_RPS` (default 3, at most 7) limits requests per second, because the token's limit is shared with other integrations that use it. Network errors and HTTP 429/5xx are retried. Files already downloaded are kept, so a broken export continues where it stopped; `--force` downloads everything again. Exported: users, pipelines with statuses, custom fields of deals, contacts and companies, companies, contacts, deals with their contacts and loss reasons, tasks, notes of deals, contacts and companies, and the `lead_status_changed` events. Deleted records, files, calls as separate entities and other events are not exported.
+   The files go to `data/amocrm-export` (`--dir` changes it; in the container this is the `opencrm_data` volume, which is not part of backups). `AMO_PROXY_URL=http://[user:password@]host:port` sends the requests through an HTTP CONNECT proxy; `AMO_RPS` (default 3, at most 7) limits requests per second, because the token's limit is shared with other integrations that use it. Network errors and HTTP 429/5xx are retried. Files already downloaded are kept, so a broken export continues where it stopped; `--force` downloads everything again. Exported: users, pipelines with statuses, custom fields of deals, contacts and companies, companies, contacts, deals with their contacts and loss reasons, tasks, notes of deals, contacts and companies, the `lead_status_changed` events, and the files attached to notes (downloaded from amoCRM Drive into `files/`; a file that fails is retried on the next run). Deleted records, calls as separate entities and other events are not exported.
 
 2. Trial load. `load --dry-run` writes everything in a transaction, runs the checks and rolls back:
 
@@ -28,7 +28,7 @@ Run the commands in the app container (`docker compose -p opencrm exec opencrm .
    docker compose -p opencrm exec opencrm node scripts/amocrm-import.mjs load
    ```
 
-   The load goes into a CRM without deals, contacts, companies, tasks, notes or custom fields. `--replace` first removes those (and pipelines with amoCRM IDs), for example to load a fresh export again; users, API keys, webhooks and settings stay. Attachments block `--replace`. The empty seed pipeline «Воронка — новые лиды» is removed unless `--keep-default-pipeline` is given.
+   The load goes into a CRM without deals, contacts, companies, tasks, notes, custom fields or attachments. `--replace` first removes those (with the attachment files, once the new data is committed) and pipelines with amoCRM IDs, for example to load a fresh export again; users, API keys, webhooks and settings stay. The empty seed pipeline «Воронка — новые лиды» is removed unless `--keep-default-pipeline` is given.
 
 4. Give people passwords: `node scripts/admin.mjs reset-password <email>` or **Настройки → Пользователи**. Loaded users cannot sign in until then; users inactive in amoCRM are disabled. An OpenCRM account with the e-mail of an amoCRM user (for example the administrator who set up the CRM) keeps its password and sessions but takes the amoCRM user ID, together with everything that refers to it, so integrations that match employees by amoCRM ID keep working; the report lists these as `rekeyed_users`.
 
@@ -40,7 +40,8 @@ What the script does with the data:
 - Statuses 142 and 143 become a won and a lost stage of each pipeline with new IDs (listed in the report as `closing_stages`); «Неразобранное» is the first active stage. Deals in won or lost stages get `closed_at` from amoCRM.
 - Custom fields keep their IDs and names; types map as in the table below. Phones, e-mails and the position of contacts, and the phone, e-mail, website and address of companies go into the card fields (several values comma-separated). A contact field named Telegram (or the Telegram messenger) also fills the contact's Telegram field. Dates are taken in the account's time zone. Select options are matched by text; values missing from the options are added to them.
 - Tasks: the first line of the text is the title, the full text the description; amoCRM types 1–3 become «Связаться», «Встреча», «Письмо», custom types keep their names; a task due at 23:59 in the account's time zone is an all-day task. A completed task's completion time is its last update.
-- Notes of every type become text; call notes include the phone, duration, result and recording link.
+- Notes of every type become text: call notes include the phone, duration, result and recording link, e-mails the sender, recipient, subject and summary.
+- Files become attachments of the same deal, contact or company, with the author and date of the note; a file note stays in the feed as «Файл: …». A dry run checks the files without copying them.
 - Stage history: a creation row per deal and a row per `lead_status_changed` event, with the employee and time.
 
 ## Manual load
