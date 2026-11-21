@@ -88,7 +88,7 @@ test('amoCRM client pages through lists, retries and exports to files', async ()
     calls.push(u.pathname + u.search);
     assert.equal(headers.Authorization, 'Bearer secret-token');
     if (u.pathname === '/api/v4/leads' && failures-- > 0) return {status: 429, body: ''};
-    if (u.pathname === '/api/v4/account') return {status: 200, body: JSON.stringify({id: 1, name: 'A', subdomain: 'a', timezone: 'Europe/Moscow', _embedded: {task_types: []}})};
+    if (u.pathname === '/api/v4/account') return {status: 200, body: JSON.stringify({id: 1, name: 'A', subdomain: 'a', datetime_settings: {timezone: 'Europe/Moscow'}, _embedded: {task_types: []}})};
     if (u.pathname === '/api/v4/leads/pipelines') return {status: 200, body: JSON.stringify({_embedded: {pipelines: fixture().pipelines}})};
     const list = pages[u.pathname];
     if (!list) return {status: 204, body: ''};
@@ -105,10 +105,11 @@ test('amoCRM client pages through lists, retries and exports to files', async ()
   assert.ok(calls.some(c => c.startsWith('/api/v4/events?filter%5Btype%5D=lead_status_changed&limit=100')));
   const dump = await readDump(dir);
   assert.deepEqual(dump.leads.map(l => l.id), [1, 2, 3]);
-  // A second run keeps what is already there.
+  // A second run downloads only the account and pipelines again.
   calls.length = 0;
   await exportAccount({client, dir, log: () => {}});
-  assert.equal(calls.length, 0);
+  assert.deepEqual(calls.map(c => c.split('?')[0]), ['/api/v4/account', '/api/v4/leads/pipelines']);
+  assert.equal(dump.account.timezone, 'Europe/Moscow');
   assert.throws(() => amoClient({baseUrl: 'http://agency.amocrm.ru', token: 'x'}), /https/);
 });
 

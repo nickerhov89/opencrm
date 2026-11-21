@@ -110,14 +110,15 @@ async function saveJson(path, data) { await writeFile(`${path}.tmp`, JSON.string
 export async function exportAccount({client, dir, force = false, log = console.log}) {
   await mkdir(dir, {recursive: true});
   const counts = {};
-  const accountFile = join(dir, 'account.json');
-  if (force || !await exists(accountFile)) {
-    const account = await client.request('/api/v4/account', {with: 'task_types'});
-    await saveJson(accountFile, {id: account.id, name: account.name, subdomain: account.subdomain, timezone: account.timezone, task_types: account._embedded?.task_types || []});
-    log(`Аккаунт: ${account.name} (${account.subdomain}), часовой пояс ${account.timezone}`);
+  // The account and pipelines are small: they are always downloaded again.
+  {
+    const account = await client.request('/api/v4/account', {with: 'task_types,datetime_settings'});
+    const timezone = account.datetime_settings?.timezone || account._embedded?.datetime_settings?.timezone || account.timezone || 'Europe/Moscow';
+    await saveJson(join(dir, 'account.json'), {id: account.id, name: account.name, subdomain: account.subdomain, timezone, task_types: account._embedded?.task_types || []});
+    log(`Аккаунт: ${account.name} (${account.subdomain}), часовой пояс ${timezone}`);
   }
-  const pipelinesFile = join(dir, 'pipelines.json');
-  if (force || !await exists(pipelinesFile)) {
+  {
+    const pipelinesFile = join(dir, 'pipelines.json');
     const pipelines = (await client.request('/api/v4/leads/pipelines'))?._embedded?.pipelines || [];
     await saveJson(pipelinesFile, pipelines);
     log(`Воронки: ${pipelines.length}`);
@@ -153,7 +154,7 @@ function localParts(seconds, timeZone) {
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'}).formatToParts(new Date(seconds * 1000)).map(p => [p.type, p.value]));
   return parts;
 }
-const safeZone = zone => { try { new Intl.DateTimeFormat('en-GB', {timeZone: zone}); return zone; } catch { return 'Europe/Moscow'; } };
+const safeZone = zone => { if (!zone) return 'Europe/Moscow'; try { new Intl.DateTimeFormat('en-GB', {timeZone: zone}); return zone; } catch { return 'Europe/Moscow'; } };
 const clip = (value, max) => { const text = value === null || value === undefined ? '' : String(value); return text.length > max ? text.slice(0, max) : text; };
 const tagsOf = record => (record?._embedded?.tags || []).map(tag => String(tag.name || '').replace(/,/g, ' ').trim()).filter(Boolean).join(', ');
 const valuesOf = (record, code) => (record.custom_fields_values || []).filter(field => field.field_code === code).flatMap(field => field.values || []).map(v => String(v.value ?? '').trim()).filter(Boolean);
