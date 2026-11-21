@@ -16,6 +16,7 @@
 - Server API (`ctx`): routes behind sign-in and public routes for incoming webhooks, CRM events (the webhook event list), periodic tasks, key-value storage, requests in «Неразобранное», events and notes in the deal feed, the plugin log. Settings forms are built from `plugin.json`; password settings are encrypted and never sent to the browser.
 - Browser API: a page in the left menu (`/apps/<plugin>/<page>`) and a panel in the deal card, drawn with the app's React or plain DOM.
 - Examples: `tilda-forms` (Tilda forms → «Неразобранное», deduplicated by `tranid`) and `hello-world`. See docs/PLUGINS.md.
+- Settings → Plugins is a grid of cards (icon, name, short description, status), with search when there are more than six. A card opens the plugin page: description, switch, «Обновить» / «Удалить», addresses for external systems, settings and log; «← Все плагины» returns to the same place in the grid. A new upload opens its page. «Обновить» sends `?expect=<id>`, and the server rejects an archive with another plugin.
 - `mango-office` plugin: Mango Office VPBX call summaries (signed) go to the open deal's feed, or to the contact or company history; inbound calls from unknown numbers become one request in «Неразобранное» per number. Recordings play in the deal card and on the «Звонки» page (journal with a missed-calls filter), proxied from Mango on demand. New plugin API: `ctx.crm.addCommunication` and `api.url` in the browser.
 
 ## Unreleased — closer to amoCRM
