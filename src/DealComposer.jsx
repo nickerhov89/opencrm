@@ -1,5 +1,5 @@
 import React,{useState} from 'react';
-import {splitAddresses} from './ComposeEmail.jsx';
+import {splitAddresses, TemplatePicker} from './ComposeEmail.jsx';
 import './deal-composer.css';
 
 const modes=[['note','Примечание'],['call','Звонок'],['email','Письмо'],['message','Сообщение']];
@@ -32,6 +32,7 @@ export default function DealComposer({note,setNote,onAddNote,onAddCommunication,
       <label>С ящика<select aria-label="Ящик отправителя" value={mailboxId||String(mailboxes[0].id)} onChange={event=>setMailboxId(event.target.value)}>{mailboxes.map(box=><option key={box.id} value={box.id}>{box.email}</option>)}</select></label>
       <label>Кому<input aria-label="Кому" value={to} onChange={event=>setTo(event.target.value)} placeholder="адрес клиента"/></label>
       <label>Копия<input aria-label="Копия" value={cc} onChange={event=>setCc(event.target.value)} placeholder="необязательно"/></label>
+      <TemplatePicker subject={subject} text={body} onPick={item=>{setSubject(item.subject);setBody(item.text)}}/>
       <label>Тема<input aria-label="Тема письма" maxLength={998} value={subject} onChange={event=>setSubject(event.target.value)}/></label>
     </div>}
     {mode!=='note'&&!sending&&<div className="deal-compose-meta"><label>Направление<select aria-label="Направление коммуникации" value={direction} onChange={event=>setDirection(event.target.value)}><option value="outgoing">Исходящее</option><option value="incoming">Входящее</option></select></label>{mode==='email'&&<label className="deal-compose-subject">Тема<input aria-label="Тема письма" maxLength={255} value={subject} onChange={event=>setSubject(event.target.value)}/></label>}</div>}
