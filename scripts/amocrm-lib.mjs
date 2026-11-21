@@ -682,7 +682,7 @@ export async function loadDump(db, dump, {dryRun = false, replace = false, keepD
 // Run once by the server after a deploy (server/index.js) when AMO_BASE_URL and AMO_ACCESS_TOKEN are
 // set: downloads the events of deals, contacts and companies straight from amoCRM and writes the card
 // history of the records already loaded here. Names come from this database and from the small amoCRM
-// lists (users, pipelines, fields). Events are read up to the moment of the first start, newest first,
+// lists (users, pipelines, fields). Events are read up to the moment of the first start (amoCRM takes the range only with both ends), newest first,
 // several pages at a time within the rate limit. The page reached is kept in app_settings, so a restart
 // (a deploy) continues where the load stopped; the rows of a page are written again, never doubled. When
 // all is loaded, app_settings remembers it and nothing more happens.
@@ -708,7 +708,7 @@ export async function syncHistoryFromAmo(db, client, {log = console.log, paralle
   const progress = saved ? JSON.parse(saved.value) : {until: Math.floor(Date.now() / 1000), page: 1, events: 0, activity: 0, entity_activity: 0};
   if (!saved) await saveSetting(historyProgressKey, progress);
   log(progress.page > 1 ? `amoCRM: продолжение загрузки истории со страницы ${progress.page} (событий уже ${progress.events})` : 'amoCRM: загрузка истории карточек');
-  const params = page => ({'filter[entity][]': ['lead', 'contact', 'company'], 'filter[created_at][to]': progress.until, limit: 100, page});
+  const params = page => ({'filter[entity][]': ['lead', 'contact', 'company'], 'filter[created_at][from]': 1, 'filter[created_at][to]': progress.until, limit: 100, page});
   let lastLog = Date.now(), done = false;
   while (!done) {
     const pages = Array.from({length: parallel}, (_, i) => progress.page + i);
