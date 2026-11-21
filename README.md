@@ -8,7 +8,7 @@
 
 ![OpenCRM pipeline with fictional demo data](docs/board-preview.png)
 
-OpenCRM is an independent project. It is not affiliated with amoCRM and does not use its code, logo, API, or customer data. **The current interface is in Russian.**
+OpenCRM is an independent project. It is not affiliated with amoCRM and does not use its code or logo. An optional [one-time import script](docs/AMOCRM_IMPORT.md) can move your own amoCRM account in through its API. **The current interface is in Russian.**
 
 ## What you can do
 
