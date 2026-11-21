@@ -347,6 +347,7 @@ test('amoCRM load keeps IDs, maps won/lost per pipeline and leaves a working CRM
       if (u.pathname === '/api/v4/events/types') return {status: 200, body: JSON.stringify({_embedded: {events_types: source.event_types}})};
       if (u.pathname === '/api/v4/events') {
         assert.deepEqual(u.searchParams.getAll('filter[entity][]'), ['lead', 'contact', 'company']);
+        assert.equal(u.searchParams.get('filter[created_at][from]'), '1', 'amoCRM refuses a range without its start');
         untilSeen.add(u.searchParams.get('filter[created_at][to]'));
         if (page === failPage) return {status: 403, body: ''};
         const chunk = source.events_history.slice((page - 1) * 7, page * 7);
