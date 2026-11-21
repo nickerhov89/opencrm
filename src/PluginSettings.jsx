@@ -1,6 +1,7 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {Copy, Puzzle, RefreshCw, Trash2, Upload} from 'lucide-react';
 import {appPath} from './app-base.js';
+import {reloadPlugins} from './plugins.jsx';
 import './plugins.css';
 
 const statusLabels = {active: 'Работает', disabled: 'Выключен', stopped: 'Остановлен', error: 'Ошибка запуска', broken: 'Повреждён'};
@@ -59,7 +60,7 @@ export default function PluginSettings({api, onError}) {
   const fileRef = useRef(null);
   const load = async () => setData(await api('/admin/plugins'));
   useEffect(() => { load().catch(onError); }, []);
-  const action = async work => { setBusy(true); try { await work(); await load(); } catch (error) { onError(error); } finally { setBusy(false); } };
+  const action = async (work, reload = true) => { setBusy(true); try { await work(); await load(); if (reload) await reloadPlugins(); } catch (error) { onError(error); } finally { setBusy(false); } };
   const upload = event => {
     const file = event.target.files?.[0];
     event.target.value = '';
@@ -73,7 +74,7 @@ export default function PluginSettings({api, onError}) {
   };
   const toggle = plugin => void action(async () => {
     const result = await api(`/admin/plugins/${plugin.id}`, {method: 'PATCH', body: {enabled: !plugin.enabled}});
-    setNotice(result.status === 'error' ? '' : result.enabled ? `«${plugin.name}» включён. Обновите страницу, чтобы появились его разделы.` : `«${plugin.name}» выключен.`);
+    setNotice(result.status === 'error' ? '' : result.enabled ? `«${plugin.name}» включён.` : `«${plugin.name}» выключен.`);
   });
   const save = (plugin, settings) => void action(async () => { await api(`/admin/plugins/${plugin.id}`, {method: 'PATCH', body: {settings}}); setNotice(`Настройки «${plugin.name}» сохранены.`); });
   const remove = plugin => { if (window.confirm(`Удалить плагин «${plugin.name}» вместе с его настройками и данными?`)) void action(async () => { await api(`/admin/plugins/${plugin.id}`, {method: 'DELETE'}); setNotice(`Плагин «${plugin.name}» удалён.`); }); };
@@ -82,7 +83,7 @@ export default function PluginSettings({api, onError}) {
     <div className="settings-section-heading">
       <div><h2>Плагины</h2><p>Расширения добавляют в OpenCRM новые разделы, блоки в карточке сделки и приём данных из внешних сервисов.</p></div>
       <div className="plugin-toolbar">
-        <button type="button" className="outline-btn" disabled={busy} onClick={() => action(load)} title="Обновить список"><RefreshCw size={15}/></button>
+        <button type="button" className="outline-btn" disabled={busy} onClick={() => action(load, false)} title="Обновить список"><RefreshCw size={15}/></button>
         {data?.upload_enabled && <><input ref={fileRef} type="file" accept=".zip,application/zip" hidden onChange={upload}/><button type="button" className="blue-btn" disabled={busy} onClick={() => fileRef.current?.click()}><Upload size={15}/> ЗАГРУЗИТЬ ПЛАГИН</button></>}
       </div>
     </div>

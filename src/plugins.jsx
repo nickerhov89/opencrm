@@ -22,8 +22,18 @@ async function request(path, options = {}) {
   return data;
 }
 
-let loading = null;
-export function loadPlugins({user, notify, openDeal}) {
+let loading = null, lastOptions = null;
+// After a plugin is switched on, off or updated in the settings: forget what plugins registered
+// and load their browser modules again.
+export function reloadPlugins() {
+  if (!lastOptions) return Promise.resolve();
+  loading = null;
+  update(() => ({loaded: false, pages: [], dealPanels: [], errors: []}));
+  return loadPlugins(lastOptions);
+}
+export function loadPlugins(options) {
+  const {user, notify, openDeal} = options;
+  lastOptions = options;
   if (loading) return loading;
   loading = (async () => {
     let list = [];

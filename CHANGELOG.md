@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — plugins
+
+- Plugins extend OpenCRM without changing its code: a ZIP with `plugin.json`, an optional server module and an optional browser module. Admins upload, configure, enable, update and delete them in Settings → Plugins; every action is in the security log. `OPENCRM_PLUGIN_UPLOAD=0` turns uploads off, `npm run plugin -- pack|install|list|enable|disable` works on the server.
+- Server API (`ctx`): routes behind sign-in and public routes for incoming webhooks, CRM events (the webhook event list), periodic tasks, key-value storage, requests in «Неразобранное», events and notes in the deal feed, the plugin log. Settings forms are built from `plugin.json`; password settings are encrypted and never sent to the browser.
+- Browser API: a page in the left menu (`/apps/<plugin>/<page>`) and a panel in the deal card, drawn with the app's React or plain DOM.
+- Examples: `tilda-forms` (Tilda forms → «Неразобранное», deduplicated by `tranid`) and `hello-world`. See docs/PLUGINS.md.
+
 ## Unreleased — closer to amoCRM
 
 - Mail sync links letters to deals through an address index built once per run: a letter takes milliseconds instead of a scan of every deal (about 18 s per letter on 7500 deals).

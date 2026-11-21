@@ -54,12 +54,15 @@ p.plugin-error{margin:0}
 .plugin-card{background:#fff;border:1px solid #dfe2e5;padding:20px 25px;font-size:13px;color:#44525d}
 .plugin-card h2{margin:0 0 10px;font-size:17px;color:#3e4a53}
 .plugin-muted{padding:35px;text-align:center;color:#a1aab1;font-size:12px}
-.plugin-deal-panels{display:grid;gap:10px;margin:14px 0}
+.plugin-deal-panels{display:grid;gap:10px;margin:14px 22px 20px}
 .plugin-deal-panel{border:1px solid #e3e7ea;background:#fbfcfc;padding:10px 14px;font-size:12px;color:#4f5a63}
 .plugin-deal-panel h3{margin:0 0 6px;font-size:11px;letter-spacing:.3px;color:#8d979e;text-transform:uppercase}
 .plugin-deal-panel p{margin:0}
 @media(max-width:760px){
-  .plugin-head{flex-wrap:wrap;padding:14px 16px}
+  .plugin-head{flex-wrap:wrap;padding:14px 16px;gap:10px}
+  .plugin-title{flex:1 1 calc(100% - 52px)}
+  .plugin-status{margin-left:48px}
+  .plugin-toolbar .blue-btn{font-size:0}
   .plugin-endpoints div,.plugin-field{grid-template-columns:1fr;gap:5px}
   .plugin-settings>div>small,.plugin-check{padding-left:0}
   .plugin-settings,.plugin-endpoints,.plugin-footer,.plugin-logs{padding-left:16px;padding-right:16px}
