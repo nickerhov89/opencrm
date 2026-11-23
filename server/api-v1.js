@@ -2,13 +2,20 @@
 // Every route takes an API key (Authorization: Bearer ocrm_...) with the listed scope. Keys are
 // instance-wide service credentials: employee visibility settings do not apply to them, the stage
 // transition rules of pipelines do.
+//
+// mirror:write marks the key of the amoCRM bridge, which keeps both CRMs equal while they run side by
+// side. It adds to the usual write scopes: creates may keep the amoCRM number (id), times (created_at,
+// updated_at) and author (author_id); stage changes skip the transition rules and the loss reason;
+// its deals skip distribution and stage tasks, and its changes start no automation. History names the
+// employee from author_id, changed_by.api_key_id in webhooks and stage changes still names the key.
 import {createHash} from 'node:crypto';
 import {queueDistribution} from './distribution.js';
 import {RuleError} from './stage-rules.js';
 import {taskTypes} from '../src/task-types.js';
 import {emailSelect, emailView} from './mail.js';
+import {syncLog, syncStatus} from './amocrm-sync.js';
 
-export const apiScopes = ['leads:write', 'deals:read', 'deals:write', 'contacts:read', 'contacts:write', 'companies:read', 'companies:write', 'tasks:read', 'tasks:write', 'users:read', 'pipelines:write', 'fields:write', 'emails:read'];
+export const apiScopes = ['leads:write', 'deals:read', 'deals:write', 'contacts:read', 'contacts:write', 'companies:read', 'companies:write', 'tasks:read', 'tasks:write', 'users:read', 'pipelines:write', 'fields:write', 'emails:read', 'mirror:write'];
 
 export class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -92,6 +99,9 @@ export function registerApiV1(app, db, helpers) {
   };
   const via = req => `через API («${req.apiKey.name}»)`;
   const apiActor = req => `API: ${req.apiKey.name}`.slice(0, 254);
+  const mirror = req => !!req.apiKey?.mirror;
+  // The employee a mirror key writes for (author_id), null for other keys.
+  const who = req => mirror(req) ? req.apiKey.author : null;
 
   async function listPage(req, res, {sql, params, alias}, decorate) {
     const {after, limit} = pageParams(req);
@@ -135,10 +145,58 @@ export function registerApiV1(app, db, helpers) {
     if (!row) throw new ApiError(404, missing[table]);
     return row;
   }
-  async function ensureRef(table, id, label) {
+  // anyUser: a disabled employee also fits (the mirror key copies records of former employees).
+  async function ensureRef(table, id, label, {anyUser = false} = {}) {
     if (!id) return;
-    const row = await db.prepare(`SELECT id FROM ${table} WHERE id=?${['contacts', 'companies', 'deals'].includes(table) ? ' AND deleted_at IS NULL' : ''}${table === 'users' ? ' AND disabled_at IS NULL' : ''}`).get(id);
+    const row = await db.prepare(`SELECT id FROM ${table} WHERE id=?${['contacts', 'companies', 'deals'].includes(table) ? ' AND deleted_at IS NULL' : ''}${table === 'users' && !anyUser ? ' AND disabled_at IS NULL' : ''}`).get(id);
     if (!row) bad(`${label} ${id} не найден`);
+  }
+  const userRef = (req, id) => ensureRef('users', id, 'Пользователь', {anyUser: mirror(req)});
+  // amoCRM gives Unix seconds; ISO 8601 and "YYYY-MM-DD HH:MM:SS" are taken as well.
+  function mirrorTime(raw, key) {
+    if (typeof raw === 'number') {
+      if (!Number.isFinite(raw) || raw <= 0 || raw > 32503680000) bad(`${key}: время в секундах Unix или ISO 8601`);
+      return new Date(raw * 1000).toISOString().slice(0, 19).replace('T', ' ');
+    }
+    return timestamp(raw, key);
+  }
+  // Mirror creates: the amoCRM number, created_at and updated_at. The number must lie below the next
+  // OpenCRM number of the table (OpenCRM numbers start far above amoCRM ones), so the sequence is left
+  // alone and later OpenCRM records never collide with it. A taken number, also in the trash, is 409.
+  async function mirrorCreate(req, body, table) {
+    if (!mirror(req)) return {};
+    const out = {}, id = idField(body, 'id');
+    if (id) {
+      const {seq} = await db.prepare("SELECT pg_get_serial_sequence(?, 'id') seq").get(table);
+      const state = await db.prepare(`SELECT last_value,is_called FROM ${seq}`).get();
+      const next = state.is_called ? Number(state.last_value) + 1 : Number(state.last_value);
+      if (id >= next) bad(`id: ${id} не ниже следующего номера OpenCRM в этой таблице (${next}); номер из amoCRM должен быть ниже`);
+      if (await db.prepare(`SELECT id FROM ${table} WHERE id=?`).get(id)) throw new ApiError(409, `Номер ${id} уже занят`);
+      out.id = id;
+    }
+    for (const key of ['created_at', 'updated_at']) {
+      const value = mirrorTime(body[key], key);
+      if (value) out[key] = value;
+    }
+    return out;
+  }
+  async function insertRow(table, row) {
+    const keys = Object.keys(row).filter(key => row[key] !== undefined);
+    try { return (await db.prepare(`INSERT INTO ${table} (${keys.join(',')}) VALUES (${placeholders(keys)})`).run(...keys.map(key => row[key]))).lastInsertRowid; }
+    catch (error) {
+      if (error?.code === '23505' && row.id) throw new ApiError(409, `Номер ${row.id} уже занят`);
+      throw error;
+    }
+  }
+  // The given updated_at is written last: contacts and custom fields saved after the insert move it.
+  async function finishMirror(table, id, times) {
+    if (times.updated_at) await db.prepare(`UPDATE ${table} SET updated_at=? WHERE id=?`).run(times.updated_at, id);
+    if (table === 'deals' && times.created_at) await db.prepare('UPDATE deal_stage_changes SET changed_at=? WHERE deal_id=? AND from_stage_id IS NULL').run(times.created_at, id);
+  }
+  // Tasks keep completed_at as ISO 8601.
+  function isoTime(raw, key) {
+    const value = mirrorTime(raw, key);
+    return value && `${value.replace(' ', 'T')}.000Z`;
   }
   function tagsField(body) {
     if (!has(body, 'tags')) return undefined;
@@ -176,14 +234,14 @@ export function registerApiV1(app, db, helpers) {
     }
     return result;
   }
-  async function saveCustom(type, entityId, values, userLabel) {
+  async function saveCustom(type, entityId, values, userLabel, userId = null) {
     for (const {field, value} of values) {
       const previous = (await db.prepare('SELECT value FROM custom_field_values WHERE field_id=? AND entity_id=?').get(field.id, entityId))?.value || '';
       if (previous === value) continue;
       await db.prepare('INSERT INTO custom_field_values (field_id,entity_id,value) VALUES (?,?,?) ON CONFLICT(field_id,entity_id) DO UPDATE SET value=excluded.value').run(field.id, entityId, value);
       const line = `Поле «${field.name}»: ${previous || '—'} → ${value || '—'} ${userLabel}`.slice(0, 1000);
-      if (type === 'deal') await event(entityId, null, line);
-      else await entityEvent(type, entityId, null, line);
+      if (type === 'deal') await event(entityId, userId, line);
+      else await entityEvent(type, entityId, userId, line);
     }
   }
   async function customValues(type, ids) {
@@ -231,6 +289,14 @@ export function registerApiV1(app, db, helpers) {
     res.json({items: taskTypes, used: used.filter(type => !taskTypes.includes(type))});
   }));
 
+  // ---------- amoCRM sync: status for health checks and the log ----------
+  app.get('/api/v1/sync/status', apiKey('deals:read'), route(async (_req, res) => res.json(await syncStatus(db))));
+  app.get('/api/v1/sync/log', apiKey('deals:read'), route(async (req, res) => {
+    const {after, limit} = pageParams(req);
+    const action = queryText(req, 'action', 40), entityType = queryText(req, 'entity_type', 20);
+    res.json(await syncLog(db, {after, limit, action, entityType, amoId: queryId(req, 'amo_id') ?? null}));
+  }));
+
   // ---------- stage history (all deals) ----------
   app.get('/api/v1/stage-changes', apiKey('deals:read'), route(async (req, res) => {
     const where = ['TRUE'], params = [];
@@ -247,7 +313,7 @@ export function registerApiV1(app, db, helpers) {
       if (time) { where.push(`c.changed_at${op}?`); params.push(time); }
     }
     await listPage(req, res, {sql: `SELECT c.id,c.deal_id,c.from_stage_id,c.from_pipeline_id,c.to_stage_id,c.to_pipeline_id,c.user_id,c.api_key_id,c.changed_at FROM deal_stage_changes c WHERE ${where.join(' AND ')}`, params, alias: 'c'},
-      async rows => rows.map(row => ({...row, changed_by: row.user_id ? {type: 'user', id: row.user_id} : row.api_key_id ? {type: 'api_key', id: row.api_key_id} : null})));
+      async rows => rows.map(row => ({...row, changed_by: row.user_id ? {type: 'user', id: row.user_id, ...(row.api_key_id ? {api_key_id: row.api_key_id} : {})} : row.api_key_id ? {type: 'api_key', id: row.api_key_id} : null})));
   }));
 
   // ---------- notes of all records of one type ----------
@@ -433,17 +499,18 @@ export function registerApiV1(app, db, helpers) {
     for (const id of unique) await ensureRef('contacts', id, 'Контакт');
     return unique;
   }
-  async function replaceDealContacts(dealId, wanted, label) {
+  async function replaceDealContacts(dealId, wanted, label, userId = null) {
     const current = (await db.prepare('SELECT dc.contact_id,c.name FROM deal_contacts dc JOIN contacts c ON c.id=dc.contact_id WHERE dc.deal_id=?').all(dealId));
+    // The main contact first: its deal.updated then covers the link changes below (one event).
+    await db.prepare('UPDATE deals SET contact_id=? WHERE id=?').run(wanted[0] || null, dealId);
     for (const row of current.filter(row => !wanted.includes(row.contact_id))) {
       await db.prepare('DELETE FROM deal_contacts WHERE deal_id=? AND contact_id=?').run(dealId, row.contact_id);
-      await event(dealId, null, `Контакт удалён из сделки: ${row.name} ${label}`);
+      await event(dealId, userId, `Контакт удалён из сделки: ${row.name} ${label}`);
     }
     for (const id of wanted.filter(id => !current.some(row => row.contact_id === id))) {
       await db.prepare('INSERT INTO deal_contacts (deal_id,contact_id) VALUES (?,?) ON CONFLICT DO NOTHING').run(dealId, id);
-      await event(dealId, null, `Контакт добавлен: ${(await db.prepare('SELECT name FROM contacts WHERE id=?').get(id)).name} ${label}`);
+      await event(dealId, userId, `Контакт добавлен: ${(await db.prepare('SELECT name FROM contacts WHERE id=?').get(id)).name} ${label}`);
     }
-    await db.prepare('UPDATE deals SET contact_id=? WHERE id=?').run(wanted[0] || null, dealId);
   }
   async function resolveStage(body, current) {
     const stageId = idField(body, 'stage_id'), pipelineId = idField(body, 'pipeline_id');
@@ -493,17 +560,20 @@ export function registerApiV1(app, db, helpers) {
   app.post('/api/v1/deals', apiKey('deals:write'), route(async (req, res) => {
     const body = objectBody(req), stage = await resolveStage(body);
     const saved = {name: text(body, 'name', 255, {required: true}), owner_id: idField(body, 'owner_id') ?? null, company_id: idField(body, 'company_id') ?? null, amount: amountField(body) ?? 0, source: text(body, 'source', 255) ?? '', tags: tagsField(body) ?? '', description: text(body, 'description', 10000) ?? '', loss_reason: stage.kind === 'lost' ? text(body, 'loss_reason', 120) ?? '' : ''};
-    await ensureRef('users', saved.owner_id, 'Пользователь');
+    await userRef(req, saved.owner_id);
     await ensureRef('companies', saved.company_id, 'Компания');
     const contacts = await dealContactsInput(body) ?? [], custom = await customInput('deal', body);
-    const result = await idempotent(req, 'deal', {...saved, stage_id: stage.id, contacts, custom: custom.map(item => [item.field.id, item.value])}, async () => {
-      const created = await db.prepare('INSERT INTO deals (name,stage_id,contact_id,company_id,owner_id,amount,source,tags,description,loss_reason) VALUES (?,?,?,?,?,?,?,?,?,?)').run(saved.name, stage.id, contacts[0] || null, saved.company_id, saved.owner_id, saved.amount, saved.source, saved.tags, saved.description, saved.loss_reason);
-      const id = created.lastInsertRowid;
+    const times = await mirrorCreate(req, body, 'deals'), closedAt = mirror(req) && stage.kind !== 'active' ? mirrorTime(body.closed_at, 'closed_at') : undefined;
+    const result = await idempotent(req, 'deal', {...saved, stage_id: stage.id, contacts, custom: custom.map(item => [item.field.id, item.value]), ...times, closed_at: closedAt}, async () => {
+      const id = await insertRow('deals', {id: times.id, name: saved.name, stage_id: stage.id, contact_id: contacts[0] || null, company_id: saved.company_id, owner_id: saved.owner_id, amount: saved.amount, source: saved.source, tags: saved.tags, description: saved.description, loss_reason: saved.loss_reason, created_at: times.created_at, closed_at: closedAt});
       for (const contactId of contacts) await db.prepare('INSERT INTO deal_contacts (deal_id,contact_id) VALUES (?,?) ON CONFLICT DO NOTHING').run(id, contactId);
-      await event(id, null, `Сделка создана ${via(req)}`);
-      await saveCustom('deal', id, custom, via(req));
-      await runStageAutomation(id, stage.id, saved.owner_id, null);
-      await queueDistribution(db, id, 'api');
+      await event(id, who(req), `Сделка создана ${via(req)}`);
+      await saveCustom('deal', id, custom, via(req), who(req));
+      if (!mirror(req)) {
+        await runStageAutomation(id, stage.id, saved.owner_id, null);
+        await queueDistribution(db, id, 'api');
+      }
+      await finishMirror('deals', id, times);
       return id;
     });
     res.status(result.repeated ? 200 : 201).json({...await getDeal(result.id), repeated: result.repeated});
@@ -512,7 +582,7 @@ export function registerApiV1(app, db, helpers) {
     const id = positiveId(req.params.id), body = objectBody(req), old = await liveRow('deals', id);
     const current = await db.prepare('SELECT id,pipeline_id,kind,name FROM stages WHERE id=?').get(old.stage_id);
     const stage = await resolveStage(body, current);
-    if (stage.id !== old.stage_id) { const ruleError = await stageRules.transitionError(old.stage_id, stage.id); if (ruleError) throw new ApiError(403, ruleError); }
+    if (stage.id !== old.stage_id && !mirror(req)) { const ruleError = await stageRules.transitionError(old.stage_id, stage.id); if (ruleError) throw new ApiError(403, ruleError); }
     const reason = text(body, 'loss_reason', 120);
     const saved = {
       name: text(body, 'name', 255, {required: has(body, 'name')}) ?? old.name,
@@ -522,37 +592,40 @@ export function registerApiV1(app, db, helpers) {
       description: text(body, 'description', 10000) ?? old.description,
       loss_reason: stage.kind !== 'lost' ? '' : reason ?? (stage.id === old.stage_id ? old.loss_reason : '')
     };
-    if (saved.owner_id !== old.owner_id) await ensureRef('users', saved.owner_id, 'Пользователь');
+    if (saved.owner_id !== old.owner_id) await userRef(req, saved.owner_id);
     if (saved.company_id !== old.company_id) await ensureRef('companies', saved.company_id, 'Компания');
     const contacts = await dealContactsInput(body), custom = await customInput('deal', body);
     await db.transaction(async () => {
       await db.prepare('UPDATE deals SET name=?,stage_id=?,company_id=?,owner_id=?,amount=?,source=?,tags=?,description=?,loss_reason=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(saved.name, stage.id, saved.company_id, saved.owner_id, saved.amount, saved.source, saved.tags, saved.description, saved.loss_reason, id);
-      if (contacts) await replaceDealContacts(id, contacts, via(req));
+      if (contacts) await replaceDealContacts(id, contacts, via(req), who(req));
       if (stage.id !== old.stage_id) {
         const moved = await db.prepare('SELECT s.name,s.pipeline_id,p.name pipeline_name FROM stages s JOIN pipelines p ON p.id=s.pipeline_id WHERE s.id=?').get(stage.id);
-        await event(id, null, `Этап изменён: ${moved.name}${moved.pipeline_id !== current.pipeline_id ? ` · Перенос в воронку «${moved.pipeline_name}»` : ''}${saved.loss_reason ? ` · ${saved.loss_reason}` : ''} ${via(req)}`);
-        await runStageAutomation(id, stage.id, saved.owner_id, null);
-      } else if (saved.loss_reason !== old.loss_reason) await event(id, null, `Причина отказа: ${saved.loss_reason || 'Без причины'} ${via(req)}`);
+        await event(id, who(req), `Этап изменён: ${moved.name}${moved.pipeline_id !== current.pipeline_id ? ` · Перенос в воронку «${moved.pipeline_name}»` : ''}${saved.loss_reason ? ` · ${saved.loss_reason}` : ''} ${via(req)}`);
+        if (!mirror(req)) await runStageAutomation(id, stage.id, saved.owner_id, null);
+      } else if (saved.loss_reason !== old.loss_reason) await event(id, who(req), `Причина отказа: ${saved.loss_reason || 'Без причины'} ${via(req)}`);
       const fresh = await db.prepare('SELECT * FROM deals WHERE id=?').get(id);
-      await logDealChanges(id, null, old, fresh);
-      await saveCustom('deal', id, custom, via(req));
+      await logDealChanges(id, who(req), old, fresh);
+      await saveCustom('deal', id, custom, via(req), who(req));
     })();
     res.json(await getDeal(id));
   }));
   app.patch('/api/v1/deals/:id/stage', apiKey('deals:write'), route(async (req, res) => {
     const id = positiveId(req.params.id), body = objectBody(req), stageId = positiveId(body.stage_id), deal = await db.prepare('SELECT d.id,d.stage_id,d.owner_id,s.pipeline_id FROM deals d JOIN stages s ON s.id=d.stage_id WHERE d.id=? AND d.deleted_at IS NULL').get(id);
     if (!deal) throw new ApiError(404, 'Сделка не найдена');
-    const stage = await db.prepare('SELECT id,pipeline_id,kind,name FROM stages WHERE id=?').get(stageId);
-    if (!stage || stage.pipeline_id !== deal.pipeline_id) bad('Выберите этап этой воронки');
+    const stage = await db.prepare('SELECT s.id,s.pipeline_id,s.kind,s.name,p.name pipeline_name FROM stages s JOIN pipelines p ON p.id=s.pipeline_id WHERE s.id=?').get(stageId);
+    // The mirror key may also move the deal to another pipeline.
+    if (!stage || stage.pipeline_id !== deal.pipeline_id && !mirror(req)) bad('Выберите этап этой воронки');
     if (stage.id === deal.stage_id) return res.json({id, stage_id: stage.id, unchanged: true});
-    const ruleError = await stageRules.transitionError(deal.stage_id, stage.id);
-    if (ruleError) throw new ApiError(403, ruleError);
+    if (!mirror(req)) {
+      const ruleError = await stageRules.transitionError(deal.stage_id, stage.id);
+      if (ruleError) throw new ApiError(403, ruleError);
+    }
     const reason = typeof body.loss_reason === 'string' ? body.loss_reason.trim().slice(0, 120) : '';
-    if (stage.kind === 'lost' && !reason) bad('Укажите причину отказа');
+    if (stage.kind === 'lost' && !reason && !mirror(req)) bad('Укажите причину отказа');
     await db.transaction(async () => {
       await db.prepare('UPDATE deals SET stage_id=?,loss_reason=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(stage.id, stage.kind === 'lost' ? reason : '', id);
-      await event(id, null, `Этап изменён через API: ${stage.name}`);
-      await runStageAutomation(id, stage.id, deal.owner_id, null);
+      await event(id, who(req), `Этап изменён через API: ${stage.name}${stage.pipeline_id !== deal.pipeline_id ? ` · Перенос в воронку «${stage.pipeline_name}»` : ''}`);
+      if (!mirror(req)) await runStageAutomation(id, stage.id, deal.owner_id, null);
     })();
     res.json({id, stage_id: stage.id});
   }));
@@ -564,7 +637,7 @@ export function registerApiV1(app, db, helpers) {
     const id = positiveId(req.params.id);
     await liveRow('deals', id);
     await db.transaction(async () => {
-      await event(id, null, `Сделка перемещена в корзину ${via(req)}`);
+      await event(id, who(req), `Сделка перемещена в корзину ${via(req)}`);
       await db.prepare('UPDATE deals SET deleted_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
     })();
     res.json({ok: true});
@@ -575,8 +648,8 @@ export function registerApiV1(app, db, helpers) {
     if (!contactId) bad('Укажите contact_id');
     await ensureRef('contacts', contactId, 'Контакт');
     const ids = (await getDeal(id)).contact_ids;
-    if (!ids.includes(contactId)) await db.transaction(() => replaceDealContacts(id, flag(body, 'main') ? [contactId, ...ids] : [...ids, contactId], via(req)))();
-    else if (flag(body, 'main')) await db.transaction(() => replaceDealContacts(id, [contactId, ...ids.filter(item => item !== contactId)], via(req)))();
+    if (!ids.includes(contactId)) await db.transaction(() => replaceDealContacts(id, flag(body, 'main') ? [contactId, ...ids] : [...ids, contactId], via(req), who(req)))();
+    else if (flag(body, 'main')) await db.transaction(() => replaceDealContacts(id, [contactId, ...ids.filter(item => item !== contactId)], via(req), who(req)))();
     res.status(201).json(await getDeal(id));
   }));
   app.delete('/api/v1/deals/:id/contacts/:contactId', apiKey('deals:write'), route(async (req, res) => {
@@ -584,7 +657,7 @@ export function registerApiV1(app, db, helpers) {
     await liveRow('deals', id);
     const ids = (await getDeal(id)).contact_ids;
     if (!ids.includes(contactId)) throw new ApiError(404, 'Контакт не связан со сделкой');
-    await db.transaction(() => replaceDealContacts(id, ids.filter(item => item !== contactId), via(req)))();
+    await db.transaction(() => replaceDealContacts(id, ids.filter(item => item !== contactId), via(req), who(req)))();
     res.json(await getDeal(id));
   }));
   app.get('/api/v1/deals/:id/activity', apiKey('deals:read'), route(async (req, res) => {
@@ -621,9 +694,9 @@ export function registerApiV1(app, db, helpers) {
     await liveRow('deals', id);
     if (!['call', 'email', 'message'].includes(body.kind)) bad('kind: call, email или message');
     if (!['incoming', 'outgoing'].includes(body.direction)) bad('direction: incoming или outgoing');
-    const subject = text(body, 'subject', 255) ?? '', content = text(body, 'body', 10000, {required: true}), userId = idField(body, 'user_id') ?? null;
+    const subject = text(body, 'subject', 255) ?? '', content = text(body, 'body', 10000, {required: true}), userId = idField(body, 'user_id') ?? who(req);
     if (body.kind !== 'email' && subject) bad('subject есть только у писем (kind: email)');
-    await ensureRef('users', userId, 'Пользователь');
+    await userRef(req, userId);
     const created = await db.prepare('INSERT INTO deal_communications (deal_id,user_id,kind,direction,subject,body) VALUES (?,?,?,?,?,?)').run(id, userId, body.kind, body.direction, subject, content);
     res.status(201).json(await db.prepare('SELECT id,deal_id,kind,direction,subject,body,user_id,created_at FROM deal_communications WHERE id=?').get(created.lastInsertRowid));
   }));
@@ -639,12 +712,13 @@ export function registerApiV1(app, db, helpers) {
   app.post('/api/v1/deals/:id/notes', apiKey('deals:write'), route(async (req, res) => {
     const id = positiveId(req.params.id), body = objectBody(req);
     await liveRow('deals', id);
-    const content = text(body, 'body', 10000, {required: true}), userId = idField(body, 'user_id') ?? null, pinned = flag(body, 'pinned') ?? false;
-    await ensureRef('users', userId, 'Пользователь');
+    const content = text(body, 'body', 10000, {required: true}), userId = idField(body, 'user_id') ?? who(req), pinned = flag(body, 'pinned') ?? false;
+    await userRef(req, userId);
+    const times = await mirrorCreate(req, body, 'notes'), noteType = mirror(req) ? text(body, 'note_type', 40) || undefined : undefined;
     const noteId = await db.transaction(async () => {
-      const created = await db.prepare('INSERT INTO notes (deal_id,user_id,body,pinned) VALUES (?,?,?,?)').run(id, userId, content, pinned ? 1 : 0);
+      const created = await insertRow('notes', {id: times.id, deal_id: id, user_id: userId, body: content, pinned: pinned ? 1 : 0, note_type: noteType, created_at: times.created_at, updated_at: times.updated_at ?? times.created_at});
       await event(id, userId, `Добавлена заметка ${via(req)}`);
-      return created.lastInsertRowid;
+      return created;
     })();
     res.status(201).json(noteView(await db.prepare('SELECT id,deal_id,body,pinned,note_type,user_id,created_at,updated_at FROM notes WHERE id=?').get(noteId)));
   }));
@@ -704,7 +778,7 @@ export function registerApiV1(app, db, helpers) {
       if (!row) throw new ApiError(404, missing[spec.table]);
       res.json(row);
     }));
-    async function entityInput(body, old) {
+    async function entityInput(body, old, anyUser = false) {
       const saved = {};
       for (const [key, max] of spec.fields) {
         const value = text(body, key, max, {required: key === 'name' && (!old || has(body, 'name'))});
@@ -712,7 +786,7 @@ export function registerApiV1(app, db, helpers) {
       }
       saved.tags = tagsField(body) ?? (old ? old.tags : '');
       saved.owner_id = has(body, 'owner_id') ? idField(body, 'owner_id') : old ? old.owner_id : null;
-      if (!old || saved.owner_id !== old.owner_id) await ensureRef('users', saved.owner_id, 'Пользователь');
+      if (!old || saved.owner_id !== old.owner_id) await ensureRef('users', saved.owner_id, 'Пользователь', {anyUser});
       for (const [key, table, label] of spec.refs) {
         saved[key] = has(body, key) ? idField(body, key) : old ? old[key] : null;
         if (!old || saved[key] !== old[key]) await ensureRef(table, saved[key], label);
@@ -720,22 +794,24 @@ export function registerApiV1(app, db, helpers) {
       return saved;
     }
     app.post(`/api/v1/${spec.path}`, write, route(async (req, res) => {
-      const body = objectBody(req), saved = await entityInput(body), custom = await customInput(type, body);
-      const result = await idempotent(req, type, {...saved, custom: custom.map(item => [item.field.id, item.value])}, async () => {
-        const created = await db.prepare(`INSERT INTO ${spec.table} (${columns.join(',')}) VALUES (${placeholders(columns)})`).run(...columns.map(key => saved[key]));
-        await entityEvent(type, created.lastInsertRowid, null, `${spec.created} ${via(req)}`);
-        await saveCustom(type, created.lastInsertRowid, custom, via(req));
-        return created.lastInsertRowid;
+      const body = objectBody(req), saved = await entityInput(body, undefined, mirror(req)), custom = await customInput(type, body);
+      const times = await mirrorCreate(req, body, spec.table);
+      const result = await idempotent(req, type, {...saved, custom: custom.map(item => [item.field.id, item.value]), ...times}, async () => {
+        const id = await insertRow(spec.table, {id: times.id, ...Object.fromEntries(columns.map(key => [key, saved[key]])), created_at: times.created_at});
+        await entityEvent(type, id, who(req), `${spec.created} ${via(req)}`);
+        await saveCustom(type, id, custom, via(req), who(req));
+        await finishMirror(spec.table, id, times);
+        return id;
       });
       res.status(result.repeated ? 200 : 201).json({...await getOne(result.id), repeated: result.repeated});
     }));
     app.patch(`/api/v1/${spec.path}/:id`, write, route(async (req, res) => {
       const id = positiveId(req.params.id), body = objectBody(req), old = await liveRow(spec.table, id);
-      const saved = await entityInput(body, old), custom = await customInput(type, body);
+      const saved = await entityInput(body, old, mirror(req)), custom = await customInput(type, body);
       await db.transaction(async () => {
         await db.prepare(`UPDATE ${spec.table} SET ${columns.map(key => `${key}=?`).join(',')} WHERE id=?`).run(...columns.map(key => saved[key]), id);
-        await logEntityChanges(type, id, null, old, saved);
-        await saveCustom(type, id, custom, via(req));
+        await logEntityChanges(type, id, who(req), old, saved);
+        await saveCustom(type, id, custom, via(req), who(req));
       })();
       res.json(await getOne(id));
     }));
@@ -743,7 +819,7 @@ export function registerApiV1(app, db, helpers) {
       const id = positiveId(req.params.id);
       const result = await db.prepare(`UPDATE ${spec.table} SET deleted_at=CURRENT_TIMESTAMP WHERE id=? AND deleted_at IS NULL`).run(id);
       if (!result.changes) throw new ApiError(404, missing[spec.table]);
-      await entityEvent(type, id, null, `Запись перемещена в корзину ${via(req)}`);
+      await entityEvent(type, id, who(req), `Запись перемещена в корзину ${via(req)}`);
       res.json({ok: true});
     }));
     app.get(`/api/v1/${spec.path}/:id/notes`, read, route(async (req, res) => {
@@ -755,10 +831,11 @@ export function registerApiV1(app, db, helpers) {
     app.post(`/api/v1/${spec.path}/:id/notes`, write, route(async (req, res) => {
       const id = positiveId(req.params.id), body = objectBody(req);
       await liveRow(spec.table, id);
-      const content = text(body, 'body', 10000, {required: true}), userId = idField(body, 'user_id') ?? null;
-      await ensureRef('users', userId, 'Пользователь');
-      const created = await db.prepare('INSERT INTO entity_notes (entity_type,entity_id,user_id,body) VALUES (?,?,?,?)').run(type, id, userId, content);
-      res.status(201).json(await db.prepare('SELECT id,entity_type,entity_id,body,note_type,user_id,created_at,updated_at FROM entity_notes WHERE id=?').get(created.lastInsertRowid));
+      const content = text(body, 'body', 10000, {required: true}), userId = idField(body, 'user_id') ?? who(req);
+      await userRef(req, userId);
+      const times = await mirrorCreate(req, body, 'entity_notes'), noteType = mirror(req) ? text(body, 'note_type', 40) || undefined : undefined;
+      const created = await db.transaction(() => insertRow('entity_notes', {id: times.id, entity_type: type, entity_id: id, user_id: userId, body: content, note_type: noteType, created_at: times.created_at, updated_at: times.updated_at ?? times.created_at}))();
+      res.status(201).json(await db.prepare('SELECT id,entity_type,entity_id,body,note_type,user_id,created_at,updated_at FROM entity_notes WHERE id=?').get(created));
     }));
   }
 
@@ -796,7 +873,7 @@ export function registerApiV1(app, db, helpers) {
     if (!task) throw new ApiError(404, 'Задача не найдена');
     res.json(task);
   }));
-  async function taskInput(body, old) {
+  async function taskInput(body, old, anyUser = false) {
     const links = {};
     for (const [key, table, label] of [['deal_id', 'deals', 'Сделка'], ['contact_id', 'contacts', 'Контакт'], ['company_id', 'companies', 'Компания']]) {
       links[key] = has(body, key) ? idField(body, key) : old ? old[key] : null;
@@ -810,7 +887,7 @@ export function registerApiV1(app, db, helpers) {
       owner = linked?.owner_id || null;
       if (!owner) bad('Укажите owner_id: у связанной записи нет ответственного');
     }
-    if (!old || owner !== old.owner_id) await ensureRef('users', owner, 'Пользователь');
+    if (!old || owner !== old.owner_id) await ensureRef('users', owner, 'Пользователь', {anyUser});
     const schedule = taskSchedule({
       due_at: has(body, 'due_at') ? body.due_at : old?.due_at ?? null,
       duration_minutes: has(body, 'duration_minutes') ? body.duration_minutes : old?.duration_minutes ?? 0,
@@ -820,25 +897,30 @@ export function registerApiV1(app, db, helpers) {
     return {title: text(body, 'title', 500, {required: !old || has(body, 'title')}) ?? old.title, description: text(body, 'description', 5000) ?? (old ? old.description : ''), task_type: text(body, 'task_type', 50) || (old ? old.task_type : 'Связаться'), owner_id: owner, ...links, ...schedule};
   }
   app.post('/api/v1/tasks', apiKey('tasks:write'), route(async (req, res) => {
-    const body = objectBody(req), saved = await taskInput(body);
-    const result = await idempotent(req, 'task', saved, async () => {
-      const created = await db.prepare('INSERT INTO tasks (title,description,task_type,due_at,duration_minutes,all_day,deal_id,contact_id,company_id,owner_id) VALUES (?,?,?,?,?,?,?,?,?,?)').run(saved.title, saved.description, saved.task_type, saved.due_at, saved.duration_minutes, saved.all_day, saved.deal_id, saved.contact_id, saved.company_id, saved.owner_id);
-      if (saved.deal_id) await event(saved.deal_id, null, `Задача создана ${via(req)}: ${saved.title}`.slice(0, 1000));
-      return created.lastInsertRowid;
+    const body = objectBody(req), saved = await taskInput(body, undefined, mirror(req));
+    const times = await mirrorCreate(req, body, 'tasks');
+    // The mirror key may create a task that is already done (completed, result, completed_at).
+    const done = mirror(req) && flag(body, 'completed') === true ? {completed_at: isoTime(body.completed_at, 'completed_at') || new Date().toISOString(), completion_result: text(body, 'result', 5000) ?? '', completed_by: who(req)} : {};
+    const result = await idempotent(req, 'task', {...saved, ...times, ...done}, async () => {
+      const id = await insertRow('tasks', {id: times.id, title: saved.title, description: saved.description, task_type: saved.task_type, due_at: saved.due_at, duration_minutes: saved.duration_minutes, all_day: saved.all_day, deal_id: saved.deal_id, contact_id: saved.contact_id, company_id: saved.company_id, owner_id: saved.owner_id, created_at: times.created_at, ...done});
+      if (saved.deal_id) await event(saved.deal_id, who(req), `Задача создана ${via(req)}: ${saved.title}`.slice(0, 1000));
+      await finishMirror('tasks', id, times);
+      return id;
     });
     res.status(result.repeated ? 200 : 201).json({...await getTask(result.id), repeated: result.repeated});
   }));
   app.patch('/api/v1/tasks/:id', apiKey('tasks:write'), route(async (req, res) => {
     const id = positiveId(req.params.id), body = objectBody(req), old = await getTask(id);
     if (!old) throw new ApiError(404, 'Задача не найдена');
-    const saved = await taskInput(body, {...old, all_day: old.all_day ? 1 : 0}), completed = flag(body, 'completed');
+    const saved = await taskInput(body, {...old, all_day: old.all_day ? 1 : 0}, mirror(req)), completed = flag(body, 'completed');
     const resultText = text(body, 'result', 5000);
-    const completedAt = completed === true ? old.completed_at || new Date().toISOString() : completed === false ? null : old.completed_at;
+    const doneAt = mirror(req) && isoTime(body.completed_at, 'completed_at');
+    const completedAt = completed === true ? old.completed_at || doneAt || new Date().toISOString() : completed === false ? null : old.completed_at;
     const completionResult = completed === false ? '' : resultText ?? old.completion_result;
     await db.transaction(async () => {
       await db.prepare('UPDATE tasks SET title=?,description=?,task_type=?,due_at=?,duration_minutes=?,all_day=?,owner_id=?,deal_id=?,contact_id=?,company_id=?,completed_at=?,completion_result=? WHERE id=?').run(saved.title, saved.description, saved.task_type, saved.due_at, saved.duration_minutes, saved.all_day, saved.owner_id, saved.deal_id, saved.contact_id, saved.company_id, completedAt, completionResult, id);
-      if (saved.deal_id && !old.completed_at && completedAt) await event(saved.deal_id, null, `Задача выполнена${completionResult ? `: ${completionResult}` : ''} ${via(req)}`.slice(0, 1000));
-      if (saved.deal_id && old.completed_at && !completedAt) await event(saved.deal_id, null, `Задача возвращена в работу ${via(req)}`);
+      if (saved.deal_id && !old.completed_at && completedAt) await event(saved.deal_id, who(req), `Задача выполнена${completionResult ? `: ${completionResult}` : ''} ${via(req)}`.slice(0, 1000));
+      if (saved.deal_id && old.completed_at && !completedAt) await event(saved.deal_id, who(req), `Задача возвращена в работу ${via(req)}`);
     })();
     res.json(await getTask(id));
   }));
@@ -846,7 +928,7 @@ export function registerApiV1(app, db, helpers) {
     const id = positiveId(req.params.id), task = await getTask(id);
     if (!task) throw new ApiError(404, 'Задача не найдена');
     await db.prepare('UPDATE tasks SET deleted_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
-    if (task.deal_id) await event(task.deal_id, null, `Задача перемещена в корзину ${via(req)}`);
+    if (task.deal_id) await event(task.deal_id, who(req), `Задача перемещена в корзину ${via(req)}`);
     res.json({ok: true});
   }));
 

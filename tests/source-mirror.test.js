@@ -30,12 +30,16 @@ test('deals.source mirrors the «Источник» field; a completed task keep
     const other = await call('/api/custom-fields', {method: 'POST', body: {entity_type: 'deal', name: 'Подысточник', field_type: 'text'}, status: 201});
     const row = () => db.prepare('SELECT source,updated_at FROM deals WHERE id=?').get(deal);
     await call(`/api/custom-fields/${field.id}/values/${deal}`, {method: 'PUT', body: {value: 'Партнер'}});
-    assert.deepEqual(await row(), {source: 'Партнер', updated_at: '2026-01-01 10:00:00'}, 'the source follows the field; updated_at stays');
+    const changed = await row();
+    assert.equal(changed.source, 'Партнер', 'the source follows the field');
+    assert.notEqual(changed.updated_at, '2026-01-01 10:00:00', 'a field change moves updated_at');
     await call(`/api/custom-fields/${other.id}/values/${deal}`, {method: 'PUT', body: {value: 'Вебинар'}});
     assert.equal((await row()).source, 'Партнер', 'other fields do not touch the source');
     await db.prepare('DELETE FROM custom_field_values WHERE field_id=? AND entity_id=?').run(field.id, deal);
     assert.equal((await row()).source, '');
-    assert.equal((await db.prepare("SELECT COUNT(*) n FROM webhook_events WHERE event_type='deal.updated'").get()).n, 0, 'the mirror sends no deal.updated');
+    const updates = (await db.prepare("SELECT payload_json FROM webhook_events WHERE event_type='deal.updated' ORDER BY id").all()).map(item => JSON.parse(item.payload_json));
+    assert.equal(updates.length, 3, 'one deal.updated per field change, none for copying the source');
+    assert.equal(updates[0].source, 'Партнер', 'the event carries the copied source');
 
     // Completing a task in the interface records who did it; reopening clears it.
     const task = await call('/api/tasks', {method: 'POST', body: {title: 'Позвонить', deal_id: deal, due_at: '2026-11-20T07:00:00.000Z'}, status: 201});

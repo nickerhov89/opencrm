@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — amoCRM sync, stage 1
+
+- amoCRM → OpenCRM sync inside OpenCRM while both CRMs run (`AMOCRM_SYNC_MODE=dry_run|amo_to_opencrm`, off by default): changes in amoCRM arrive within a minute through the same transform as the move, with amoCRM numbers, compared by state against the last agreed snapshot; conflicts go by `AMOCRM_SYNC_PRIMARY`. No stage rules, distribution or stage tasks for synced records. `GET /api/v1/sync/status` and `/api/v1/sync/log` for health checks. Writing to amoCRM is stage 2. See docs/AMOCRM_SYNC.md.
+
+## Unreleased — amoCRM bridge key
+
+- New API key scope `mirror:write` for the bridge that keeps amoCRM and OpenCRM equal while both run: creates keep the amoCRM number, times and author (`id`, `created_at`, `updated_at`, `author_id`; 409 for a taken number, numbers must stay below OpenCRM's own), stage changes skip transition rules and the loss reason, its deals skip distribution and stage tasks. History names the employee from `author_id`; `changed_by.api_key_id` still names the key. See docs/INTEGRATIONS.md → Mirror key.
+- A changed custom field (deal, contact, company) or list of deal contacts moves the record's `updated_at` and sends `deal.updated` / `contact.updated` / `company.updated` — also for «Источник», which used to leave both alone.
+- New webhook and plugin events `note.updated` and `note.deleted`; contact, company, task and note events carry `changed_by` like deal events.
+- `GET /api/v1/stage-changes`: `changed_by` of a change made by an employee through a key also has `api_key_id`.
+
 ## Unreleased — mail, plugin and lead access
 
 - Sending mail needs access to the mailbox: administrators send from every mailbox, an employee from the mailbox with their own e-mail and from the mailboxes an administrator ticks for them in Settings → Mail («Кто отправляет»). Each mailbox row lists who sends from it; `user_ids` in the mailbox API.

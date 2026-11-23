@@ -47,6 +47,13 @@ services:
       AMO_ACCESS_TOKEN: ${AMO_ACCESS_TOKEN:-}
       AMO_PROXY_URL: ${AMO_PROXY_URL:-}
       AMO_RPS: ${AMO_RPS:-3}
+      # amoCRM ⇄ OpenCRM sync while both run (server/amocrm-sync.js): off | dry_run | amo_to_opencrm | both.
+      AMOCRM_SYNC_MODE: ${AMOCRM_SYNC_MODE:-off}
+      AMOCRM_SYNC_PRIMARY: ${AMOCRM_SYNC_PRIMARY:-amo}
+      AMOCRM_SYNC_SINCE: ${AMOCRM_SYNC_SINCE:-}
+      AMOCRM_SYNC_INTERVAL_SEC: ${AMOCRM_SYNC_INTERVAL_SEC:-60}
+      AMOCRM_SYNC_OVERLAP_SEC: ${AMOCRM_SYNC_OVERLAP_SEC:-120}
+      AMOCRM_SYNC_DEFAULT_OWNER_ID: ${AMOCRM_SYNC_DEFAULT_OWNER_ID:-}
     volumes:
       - opencrm_data:/app/data
     restart: unless-stopped
