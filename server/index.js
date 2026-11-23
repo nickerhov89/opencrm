@@ -11,6 +11,7 @@ import { registerNotifications } from './notifications.js';
 import { registerReports } from './reports.js';
 import { registerTeamChat, dealChat } from './team-chat.js';
 import { registerDistribution, queueDistribution } from './distribution.js';
+import { syncConfig, syncLog, syncStatus, startAmoSync } from './amocrm-sync.js';
 import { registerPlugins } from './plugins.js';
 import { createStageRules, RuleError } from './stage-rules.js';
 import { permissionEntities, permissionActions, normalizePermissions, noPermissions, defaultMemberPermissions, securityHeaders, createLoginLimiter, createRateLimiter, ipBucket, hashPassword, verifyPassword, newTotpSecret, verifyTotp, otpauthUrl } from './security.js';
@@ -1027,6 +1028,9 @@ function registerPurge(){
   });
 }
 registerIntegrations(app,db,{auth,admin,audit,event,entityEvent,logEntityChanges,logDealChanges,runStageAutomation,customValueError,parseTags,taskSchedule,stageRules});
+// amoCRM sync status and log for administrators (the portal reads the same through /api/v1/sync/*).
+app.get('/api/sync/status',auth,admin,async(_req,res)=>res.json(await syncStatus(db)));
+app.get('/api/sync/log',auth,admin,async(req,res)=>{const after=Math.max(0,int(req.query.after)||0),limit=Math.min(500,Math.max(1,int(req.query.limit)||100));res.json(await syncLog(db,{after,limit,action:String(req.query.action||'').slice(0,40),entityType:String(req.query.entity_type||'').slice(0,20),amoId:int(req.query.amo_id)||null}))});
 registerMail(app,db,{auth,admin,audit,requirePermission,secretFile:secretFilePath(uploadDir)});
 registerNotifications(app,db,{auth});
 registerReports(app,db,{auth,admin,audit});
@@ -1057,5 +1061,14 @@ if (process.env.NODE_ENV !== 'test' && process.env.AMO_BASE_URL && (process.env.
     }
   };
   setTimeout(amoHistory,10000).unref();
+}
+// amoCRM ⇄ OpenCRM sync while both CRMs run: AMOCRM_SYNC_MODE=dry_run|amo_to_opencrm|both (off by
+// default), with the same AMO_* connection as the history load. See server/amocrm-sync.js.
+if (process.env.NODE_ENV !== 'test' && syncConfig().mode !== 'off') {
+  try {
+    const {amoClient}=await import('../scripts/amocrm-lib.mjs');
+    const client=amoClient({baseUrl:process.env.AMO_BASE_URL,token:process.env.AMO_ACCESS_TOKEN||process.env.AMO_TOKEN,proxyUrl:process.env.AMO_PROXY_URL||'',minIntervalMs:Math.ceil(1000/Math.min(7,Math.max(0.5,Number(process.env.AMO_RPS)||3))),log:message=>console.log(`amoCRM sync: ${message.trim()}`)});
+    startAmoSync(db,client,syncConfig(),{log:message=>console.log(message)});
+  } catch(error) { console.error(`amoCRM sync не запущен: ${error.message}`); }
 }
 export { app, db, plugins };

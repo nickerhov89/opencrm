@@ -6,7 +6,7 @@ import {isIP} from 'node:net';
 import {apiScopes, registerApiV1} from './api-v1.js';
 
 const scopes = apiScopes;
-export const eventTypes = ['lead.created', 'deal.created', 'deal.updated', 'deal.stage_changed', 'deal.deleted', 'contact.created', 'contact.updated', 'contact.deleted', 'company.created', 'company.updated', 'company.deleted', 'task.created', 'task.updated', 'task.completed', 'task.deleted', 'note.created'];
+export const eventTypes = ['lead.created', 'deal.created', 'deal.updated', 'deal.stage_changed', 'deal.deleted', 'contact.created', 'contact.updated', 'contact.deleted', 'company.created', 'company.updated', 'company.deleted', 'task.created', 'task.updated', 'task.completed', 'task.deleted', 'note.created', 'note.updated', 'note.deleted'];
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const positiveId = value => Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
 const clean = (value, max) => typeof value === 'string' ? value.trim().slice(0, max) : '';
@@ -108,9 +108,20 @@ export function registerIntegrations(app, db, {auth, admin, audit = () => {}, ..
       if (!key) return fail(res, 401, 'Нужен действующий ключ API');
       const granted = JSON.parse(key.scopes_json);
       if (anyOf.length && !anyOf.some(scope => granted.includes(scope))) return fail(res, 403, `У ключа нет нужного права: ${anyOf.join(' или ')}`);
+      // A mirror key (amoCRM bridge) writes on behalf of an employee: author_id in the body or the
+      // query string. History, stage changes and completed tasks then name that employee, while
+      // changed_by.api_key_id in webhooks and stage changes still names the key.
+      let author = null;
+      if (granted.includes('mirror:write')) {
+        const raw = req.body && typeof req.body === 'object' && !Array.isArray(req.body) && req.body.author_id != null ? req.body.author_id : req.query.author_id;
+        if (raw != null && raw !== '') {
+          author = positiveId(raw);
+          if (!author || typeof raw === 'boolean' || !await db.prepare('SELECT id FROM users WHERE id=?').get(author)) return fail(res, 400, `author_id: сотрудник ${raw} не найден`);
+        }
+      }
       await db.prepare('UPDATE api_keys SET last_used_at=CURRENT_TIMESTAMP WHERE id=?').run(key.id);
-      req.apiKey = {id: key.id, name: key.name, scopes: granted};
-      db.runAs(`api_key:${key.id}`, next);
+      req.apiKey = {id: key.id, name: key.name, scopes: granted, mirror: granted.includes('mirror:write'), author};
+      db.runAs(author ? `api_key:${key.id},user:${author}` : `api_key:${key.id}`, next);
     };
   }
 

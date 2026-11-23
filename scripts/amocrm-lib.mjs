@@ -373,7 +373,12 @@ function historyRows(dump, rows, {uid, dealIds, contactIds, companyIds, warn}) {
   if (dump.events_history == null && dump.leads.length) warn('В выгрузке нет истории событий (выгрузка сделана старой версией скрипта): запустите export ещё раз');
 }
 
-// Turns an export into table rows. existing = what the target database already has.
+// Turns an export into table rows. existing = what the target database already has. The amoCRM sync
+// (server/amocrm-sync.js) turns a small batch of changes and passes more of the database:
+//   userMap(amoUserId) → OpenCRM user ID or null — no users are created;
+//   stages: [{id, pipeline_id, kind, sort_order}] — stage IDs of the database instead of new ones;
+//   known: {deal, contact, company} — IDs already in the database, so links to them are kept.
+//   strictStages: a deal with an unknown stage is skipped instead of going to the first stage.
 export function transform(dump, existing = {users: [], maxStageId: 0}) {
   const warnings = {};
   const warn = (key, example) => { warnings[key] ??= {count: 0, examples: []}; warnings[key].count++; if (example !== undefined && warnings[key].examples.length < 5) warnings[key].examples.push(example); };
@@ -382,7 +387,7 @@ export function transform(dump, existing = {users: [], maxStageId: 0}) {
 
   // Users. An e-mail that already has an account here keeps that account; amoCRM records point at it.
   const userMap = new Map(), byEmail = new Map(existing.users.map(user => [user.email.toLowerCase(), user.id])), takenIds = new Set(existing.users.map(user => user.id)), mergedUsers = [];
-  for (const user of dump.users) {
+  for (const user of existing.userMap ? [] : dump.users) {
     const email = String(user.email || `amo-user-${user.id}@import.invalid`).trim().toLowerCase();
     if (byEmail.has(email)) { userMap.set(user.id, byEmail.get(email)); if (byEmail.get(email) !== user.id) mergedUsers.push({amo_id: user.id, email, id: byEmail.get(email)}); continue; }
     if (takenIds.has(user.id)) throw new Error(`ID пользователя amoCRM ${user.id} уже занят другим пользователем OpenCRM`);
@@ -390,7 +395,7 @@ export function transform(dump, existing = {users: [], maxStageId: 0}) {
     rows.users.push({id: user.id, name: clip(user.name || email, 120), email, password_hash: 'x:y', role: admin ? 'admin' : 'member', permissions_json: JSON.stringify(admin ? fullPermissions() : defaultMemberPermissions()), disabled_at: user.rights?.is_active === false ? toText(Date.now() / 1000) : null});
     userMap.set(user.id, user.id); byEmail.set(email, user.id); takenIds.add(user.id);
   }
-  const uid = id => userMap.get(Number(id)) ?? null;
+  const uid = existing.userMap ? id => existing.userMap(Number(id)) ?? null : id => userMap.get(Number(id)) ?? null;
 
   // Pipelines and stages; 142/143 are shared in amoCRM, every pipeline here gets its own won/lost stage.
   const stageIds = new Set(), closing = new Map(), firstStage = new Map(), stageKind = new Map();
@@ -409,6 +414,17 @@ export function transform(dump, existing = {users: [], maxStageId: 0}) {
       stageIds.add(stage.newId); stageKind.set(stage.newId, stage.kind);
     });
     if (active.length) firstStage.set(pipeline.id, active[0].id);
+  }
+  if (existing.stages) {
+    closing.clear(); firstStage.clear(); stageIds.clear(); stageKind.clear();
+    for (const stage of [...existing.stages].sort((a, b) => a.sort_order - b.sort_order || a.id - b.id)) {
+      stageIds.add(stage.id); stageKind.set(stage.id, stage.kind);
+      const ids = closing.get(stage.pipeline_id) || {};
+      if (stage.kind === 'won') ids[142] ??= stage.id;
+      if (stage.kind === 'lost') ids[143] ??= stage.id;
+      closing.set(stage.pipeline_id, ids);
+      if (stage.kind === 'active' && !firstStage.has(stage.pipeline_id)) firstStage.set(stage.pipeline_id, stage.id);
+    }
   }
   const mapStatus = (pipelineId, statusId) => {
     if (statusId === 142 || statusId === 143) return closing.get(Number(pipelineId))?.[statusId] ?? null;
@@ -457,7 +473,7 @@ export function transform(dump, existing = {users: [], maxStageId: 0}) {
   };
 
   // Companies, contacts, deals.
-  const companyIds = new Set(), contactIds = new Set(), dealIds = new Set(), dealStage = new Map();
+  const companyIds = new Set(existing.known?.company), contactIds = new Set(existing.known?.contact), dealIds = new Set(existing.known?.deal), dealStage = new Map();
   for (const company of dump.companies) {
     rows.companies.push({id: company.id, name: clip(String(company.name || '').trim() || `Компания #${company.id}`, 255), owner_id: uid(company.responsible_user_id), website: clip(valuesOf(company, 'WEB').join(', '), 255), address: clip(valuesOf(company, 'ADDRESS').join(', '), 500), phone: clip(valuesOf(company, 'PHONE').join(', '), 255), email: clip(valuesOf(company, 'EMAIL').join(', ').toLowerCase(), 254), notes: '', tags: tagsOf(company), created_at: toText(company.created_at) ?? toText(Date.now() / 1000), updated_at: toText(company.updated_at) ?? toText(company.created_at) ?? toText(Date.now() / 1000), deleted_at: null});
     companyIds.add(company.id); saveValues(company, 'companies');
@@ -475,6 +491,7 @@ export function transform(dump, existing = {users: [], maxStageId: 0}) {
     if (!stageIds.has(stage)) {
       const fallback = firstStage.get(lead.pipeline_id);
       if (!fallback) { warn('Сделки из неизвестных воронок пропущены', lead.id); continue; }
+      if (existing.strictStages) { warn('Сделки с неизвестным этапом пропущены', lead.id); continue; }
       warn('Сделки с неизвестным этапом поставлены в первый этап воронки', lead.id); stage = fallback;
     }
     const contacts = (lead._embedded?.contacts || []).filter(c => contactIds.has(c.id));
@@ -561,7 +578,7 @@ const businessTables = ['deals', 'contacts', 'companies', 'tasks', 'custom_field
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 export const uploadDir = () => resolve(process.env.UPLOAD_DIR || join(projectRoot, 'data/uploads'));
 
-async function insertRows(db, table, rows) {
+export async function insertRows(db, table, rows) {
   if (!rows.length) return;
   const columns = Object.keys(rows[0]);
   const perChunk = Math.max(1, Math.floor(30000 / columns.length));

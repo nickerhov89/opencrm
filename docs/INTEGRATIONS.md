@@ -19,6 +19,7 @@ Create a named key in Settings → Интеграции and select only the scop
 | `users:read` | List employees (ID, name, email, role, active) to assign owners |
 | `pipelines:write` | Create and rename pipelines and stages, reorder stages, set stage transition rules |
 | `fields:write` | Create and change custom fields (and read all of them) |
+| `mirror:write` | Only for the amoCRM bridge key: changes how the key's writes behave, see [Mirror key](#mirror-key-amocrm-bridge). Give it together with the write scopes it needs |
 
 API keys are instance-wide service credentials: the visibility settings of individual employees ("only own deals") do not apply to them, so give a key only the scopes the connected system needs. Stage transition rules of pipelines do apply to API keys.
 
@@ -207,6 +208,18 @@ GET /api/v1/emails                  # all stored letters; filters: deal_id, mail
 
 `scripts/amocrm-import.mjs` moves an amoCRM account in once, keeping amoCRM IDs; see [AMOCRM_IMPORT.md](AMOCRM_IMPORT.md).
 
+While both CRMs run, OpenCRM can follow amoCRM changes itself: see [AMOCRM_SYNC.md](AMOCRM_SYNC.md).
+
+### Mirror key (amoCRM bridge)
+
+While amoCRM and OpenCRM run side by side, a bridge keeps them equal in both directions. Its key has `mirror:write` next to the usual scopes (`deals:write`, `contacts:write`, `companies:write`, `tasks:write` and the read scopes). For other keys nothing below applies, and the extra fields are ignored.
+
+- **Author.** `author_id` (in the JSON body, or `?author_id=` for requests without a body) is the employee the change is made for — the amoCRM user, under the same ID. History entries, stage changes (`user_id`) and completed tasks (`completed_by`) name that employee; `changed_by.api_key_id` in webhooks and `api_key_id` in stage changes still name the key, so the bridge recognises its own changes. An unknown `author_id` is 400. Without it the change is made by the key alone.
+- **Numbers and times on create.** `POST` of deals, contacts, companies, tasks and notes (deal, contact and company notes) take `id` — the amoCRM number — and `created_at`, `updated_at` as Unix seconds or ISO 8601. The number must be below the next OpenCRM number of that table (OpenCRM numbers start at 50 000 001, notes at 500 000 001), so ID sequences are never moved; otherwise 400. A number that is already taken, also by a record in the trash, is 409. Deals also take `closed_at` (closed stages only); notes take `note_type` (amoCRM types such as `call_in`); tasks may be created done: `completed: true`, `result`, `completed_at`. `PATCH /api/v1/tasks/:id` with `completed: true` also takes `completed_at`.
+- **Stages.** `PATCH /api/v1/deals/:id` and `PATCH /api/v1/deals/:id/stage` skip the pipeline's transition rules and the ban on moving deals to another pipeline; `/stage` also takes a stage of another pipeline and does not ask for `loss_reason`.
+- **No robots.** Deals the key creates do not go to distribution and get no stage task; its stage changes create no stage tasks either.
+- **Owners.** `owner_id` and note `user_id` may name a disabled employee (records of former employees are copied as they are).
+
 ## Leads
 
 ```bash
@@ -229,15 +242,16 @@ Create an endpoint in Settings → Интеграции with an HTTPS URL and se
 |---|---|
 | `lead.created` | A lead is added to the inbox, including via a public form or API |
 | `deal.created` | A deal is created, including by accepting a lead or CSV import |
-| `deal.updated` | Any field of a deal changes, including the stage, or a deal is restored from the trash |
+| `deal.updated` | Any field of a deal changes, including the stage, a custom field and the list of contacts, or a deal is restored from the trash |
 | `deal.stage_changed` | A deal changes stage, including through the API or bulk actions; `data` adds `previous_stage_id` and `previous_pipeline_id` |
 | `deal.deleted` | A deal is moved to the trash |
-| `contact.created` / `contact.updated` / `contact.deleted` | A contact is created, changed, or moved to the trash |
+| `contact.created` / `contact.updated` / `contact.deleted` | A contact is created, changed (custom fields included), or moved to the trash |
 | `company.created` / `company.updated` / `company.deleted` | The same for companies |
 | `task.created` / `task.updated` / `task.completed` / `task.deleted` | A task is created, changed, completed, or moved to the trash |
 | `note.created` | A note is added to a deal, contact or company (`data.entity_type`, `data.entity_id`) |
+| `note.updated` / `note.deleted` | A note's text, type or pin changes / a note is deleted (also when its record is deleted for good) |
 
-Events fire for changes made in the interface and through the API alike. Deal events carry the deal fields (`id`, `pipeline_id`, `stage_id`, `name`, `amount`, `owner_id`, `contact_id`, `company_id`, `source`, `tags`, `loss_reason`, `created_at`, `updated_at`, `closed_at`, `deleted_at`) and `changed_by: {"user_id": …, "api_key_id": …}` — who made the change (both `null` for system changes); contact, company and task events carry the record's columns. Events are stored only while an active endpoint subscribes to them.
+Events fire for changes made in the interface and through the API alike. Deal events carry the deal fields (`id`, `pipeline_id`, `stage_id`, `name`, `amount`, `owner_id`, `contact_id`, `company_id`, `source`, `tags`, `loss_reason`, `created_at`, `updated_at`, `closed_at`, `deleted_at`) and `changed_by: {"user_id": …, "api_key_id": …}` — who made the change (both `null` for system changes); contact, company, task and note events carry the record's columns and the same `changed_by`. A changed custom field or list of deal contacts moves the record's `updated_at`, so `updated_since` finds it, and sends `*.updated` unless the record already got `*.created` or `*.updated` in the same request. Events are stored only while an active endpoint subscribes to them.
 
 Each request is an HTTP POST with `Content-Type: application/json`. Example body:
 
