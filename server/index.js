@@ -1030,7 +1030,7 @@ function registerPurge(){
 registerIntegrations(app,db,{auth,admin,audit,event,entityEvent,logEntityChanges,logDealChanges,runStageAutomation,customValueError,parseTags,taskSchedule,stageRules});
 // amoCRM sync status and log for administrators (the portal reads the same through /api/v1/sync/*).
 app.get('/api/sync/status',auth,admin,async(_req,res)=>res.json(await syncStatus(db)));
-app.get('/api/sync/log',auth,admin,async(req,res)=>{const after=Math.max(0,int(req.query.after)||0),limit=Math.min(500,Math.max(1,int(req.query.limit)||100));res.json(await syncLog(db,{after,limit,action:String(req.query.action||'').slice(0,40),entityType:String(req.query.entity_type||'').slice(0,20),amoId:int(req.query.amo_id)||null}))});
+app.get('/api/sync/log',auth,admin,async(req,res)=>{const after=Math.max(0,int(req.query.after)||0),limit=Math.min(500,Math.max(1,int(req.query.limit)||100));res.json(await syncLog(db,{after,limit,action:String(req.query.action||'').slice(0,40),entityType:String(req.query.entity_type||'').slice(0,20),amoId:int(req.query.amo_id)||null,direction:String(req.query.direction||'').slice(0,20)}))});
 registerMail(app,db,{auth,admin,audit,requirePermission,secretFile:secretFilePath(uploadDir)});
 registerNotifications(app,db,{auth});
 registerReports(app,db,{auth,admin,audit});

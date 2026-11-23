@@ -293,8 +293,8 @@ export function registerApiV1(app, db, helpers) {
   app.get('/api/v1/sync/status', apiKey('deals:read'), route(async (_req, res) => res.json(await syncStatus(db))));
   app.get('/api/v1/sync/log', apiKey('deals:read'), route(async (req, res) => {
     const {after, limit} = pageParams(req);
-    const action = queryText(req, 'action', 40), entityType = queryText(req, 'entity_type', 20);
-    res.json(await syncLog(db, {after, limit, action, entityType, amoId: queryId(req, 'amo_id') ?? null}));
+    const action = queryText(req, 'action', 40), entityType = queryText(req, 'entity_type', 20), direction = queryText(req, 'direction', 20);
+    res.json(await syncLog(db, {after, limit, action, entityType, direction, amoId: queryId(req, 'amo_id') ?? null}));
   }));
 
   // ---------- stage history (all deals) ----------

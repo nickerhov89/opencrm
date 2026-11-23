@@ -15,11 +15,11 @@ import {taskTypes} from '../src/task-types.js';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // GET over HTTPS, optionally through an HTTP CONNECT proxy (http://user:pass@host:port).
-function httpsGet(url, headers, proxyUrl, timeoutMs = 60000) {
+function httpsGet(url, headers, proxyUrl, timeoutMs = 60000, method = 'GET', body = null) {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const finish = socket => {
-      const request = https.request({host: target.hostname, port: target.port || 443, path: target.pathname + target.search, method: 'GET', headers, timeout: timeoutMs,
+      const request = https.request({host: target.hostname, port: target.port || 443, path: target.pathname + target.search, method, headers, timeout: timeoutMs,
         ...(socket ? {agent: false, createConnection: () => tls.connect({socket, servername: target.hostname})} : {})}, response => {
         const chunks = [];
         response.on('data', chunk => chunks.push(chunk));
@@ -28,7 +28,7 @@ function httpsGet(url, headers, proxyUrl, timeoutMs = 60000) {
       });
       request.on('timeout', () => request.destroy(new Error('timeout')));
       request.on('error', reject);
-      request.end();
+      request.end(body || undefined);
     };
     if (!proxyUrl) return finish(null);
     const proxy = new URL(proxyUrl);
@@ -44,7 +44,7 @@ function httpsGet(url, headers, proxyUrl, timeoutMs = 60000) {
   });
 }
 
-export function amoClient({baseUrl, token, proxyUrl = '', minIntervalMs = 160, retries = 8, get = httpsGet, log = () => {}} = {}) {
+export function amoClient({baseUrl, token, proxyUrl = '', minIntervalMs = 160, retries = 8, get = httpsGet, transport = (url, headers, proxy, method, body) => httpsGet(url, headers, proxy, 60000, method, body), log = () => {}} = {}) {
   if (!baseUrl || !token) throw new Error('Нужны AMO_BASE_URL (https://<поддомен>.amocrm.ru) и AMO_ACCESS_TOKEN (долгосрочный токен интеграции)');
   const base = new URL(baseUrl);
   if (base.protocol !== 'https:') throw new Error('AMO_BASE_URL должен начинаться с https://');
@@ -121,7 +121,41 @@ export function amoClient({baseUrl, token, proxyUrl = '', minIntervalMs = 160, r
       if (!chunk.length || !data._links?.next) return items;
     }
   }
-  return {request, list, download};
+  // Writes (POST, PATCH, DELETE) share the rate limit. 429 is always tried again; a 5xx or a network
+  // error only for PATCH and DELETE — a POST may have been done already, so it is not repeated here.
+  async function send(method, path, body) {
+    const url = new URL(path, base.origin);
+    const payload = body == null ? null : Buffer.from(JSON.stringify(body));
+    for (let attempt = 1; ; attempt++) {
+      const slot = Math.max(Date.now(), last + minIntervalMs);
+      last = slot;
+      if (slot > Date.now()) await sleep(slot - Date.now());
+      const headers = {Authorization: `Bearer ${token}`, Accept: 'application/json', 'User-Agent': 'opencrm-sync', ...(payload ? {'Content-Type': 'application/json', 'Content-Length': payload.length} : {})};
+      let response;
+      try {
+        try { response = await transport(url.href, headers, direct.has(url.hostname) ? '' : proxyUrl, method, payload); }
+        catch (error) {
+          if (!proxyUrl || direct.has(url.hostname) || !/^proxy CONNECT/.test(error.message)) throw error;
+          direct.add(url.hostname);
+          response = await transport(url.href, headers, '', method, payload);
+        }
+      } catch (error) {
+        if (method === 'POST' || attempt >= retries) throw new Error(`${method} ${url.pathname}: ${error.message}`);
+        await sleep(Math.min(30000, 1000 * 2 ** (attempt - 1)));
+        continue;
+      }
+      if (response.status === 429 || response.status >= 500 && method !== 'POST') {
+        if (attempt >= retries) throw new Error(`amoCRM ответил ${response.status} на ${method} ${url.pathname}`);
+        log(`  amoCRM ${response.status} на ${method}, повтор ${attempt}`);
+        await sleep(Math.min(30000, 1500 * 2 ** (attempt - 1)));
+        continue;
+      }
+      if (response.status === 204) return null;
+      if (response.status >= 200 && response.status < 300) return response.body ? JSON.parse(response.body) : null;
+      throw new Error(`amoCRM ответил ${response.status} на ${method} ${url.pathname}: ${String(response.body || '').slice(0, 500)}`);
+    }
+  }
+  return {request, list, download, send};
 }
 
 // What is exported, file by file: [file, path, embedded key, params, page size].

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — amoCRM sync, stage 2
+
+- OpenCRM → amoCRM in `AMOCRM_SYNC_MODE=both`: fields changed in OpenCRM, records, tasks and notes made here, completed tasks and the trash are written to amoCRM through API v4. `AMOCRM_SYNC_TO_AMO=dry_run` (the default) only logs the requests it would send, once per change; `on` writes. amoCRM → OpenCRM keeps working as before.
+- Records made here get their amoCRM number in `amocrm_sync_links` (`amo_id` ≠ `opencrm_id`); amoCRM changes find them by that pair. After a write the record is read back from amoCRM, so the next read brings nothing back.
+- Deleted here: a deal gets the tag «Удалена в OpenCRM» and goes to «Закрыто и не реализовано», a contact or company gets the tag, a task is completed with that result. «Неразобранное», unknown list options and loss reasons amoCRM does not have are logged as `unsupported` (a loss reason goes to a note).
+- `GET /api/v1/sync/status`: `to_amo`, `writes_to_amo`, `lag_seconds.opencrm_to_amo` and per-direction counters in `directions`; `GET /api/v1/sync/log?direction=`.
+
 ## Unreleased — amoCRM sync, stage 1
 
 - amoCRM → OpenCRM sync inside OpenCRM while both CRMs run (`AMOCRM_SYNC_MODE=dry_run|amo_to_opencrm`, off by default): changes in amoCRM arrive within a minute through the same transform as the move, with amoCRM numbers, compared by state against the last agreed snapshot; conflicts go by `AMOCRM_SYNC_PRIMARY`. No stage rules, distribution or stage tasks for synced records. `GET /api/v1/sync/status` and `/api/v1/sync/log` for health checks. Writing to amoCRM is stage 2. See docs/AMOCRM_SYNC.md.
