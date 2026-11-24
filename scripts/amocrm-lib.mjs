@@ -14,32 +14,46 @@ import {taskTypes} from '../src/task-types.js';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// GET over HTTPS, optionally through an HTTP CONNECT proxy (http://user:pass@host:port).
-function httpsGet(url, headers, proxyUrl, timeoutMs = 60000, method = 'GET', body = null) {
+// A request over HTTPS, optionally through an HTTP CONNECT proxy (http://user:pass@host:port).
+// Every failure of the proxy — refused, reset, silent, a bad answer — rejects the promise with an
+// error that starts with «proxy»; no socket is left without an 'error' listener, so a dead proxy never
+// takes the process down. Reaching the proxy and getting its answer is limited to proxyTimeoutMs.
+export function httpsGet(url, headers, proxyUrl, timeoutMs = 60000, method = 'GET', body = null, proxyTimeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
+    let settled = false;
+    const fail = error => { if (!settled) { settled = true; reject(error); } };
     const finish = socket => {
+      let tlsSocket = null;
       const request = https.request({host: target.hostname, port: target.port || 443, path: target.pathname + target.search, method, headers, timeout: timeoutMs,
-        ...(socket ? {agent: false, createConnection: () => tls.connect({socket, servername: target.hostname})} : {})}, response => {
+        ...(socket ? {agent: false, createConnection: () => { tlsSocket = tls.connect({socket, servername: target.hostname}); tlsSocket.on('error', fail); return tlsSocket; }} : {})}, response => {
         const chunks = [];
         response.on('data', chunk => chunks.push(chunk));
-        response.on('end', () => resolve({status: response.statusCode, headers: response.headers, raw: Buffer.concat(chunks), get body() { return this.raw.toString('utf8'); }}));
-        response.on('error', reject);
+        response.on('end', () => { if (settled) return; settled = true; resolve({status: response.statusCode, headers: response.headers, raw: Buffer.concat(chunks), get body() { return this.raw.toString('utf8'); }}); });
+        response.on('error', fail);
+        response.on('aborted', () => fail(new Error('соединение прервано')));
       });
       request.on('timeout', () => request.destroy(new Error('timeout')));
-      request.on('error', reject);
+      request.on('error', fail);
+      request.on('close', () => { socket?.destroy(); fail(new Error('соединение закрыто')); });
       request.end(body || undefined);
     };
     if (!proxyUrl) return finish(null);
     const proxy = new URL(proxyUrl);
     const auth = proxy.username ? {'Proxy-Authorization': `Basic ${Buffer.from(`${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`).toString('base64')}`} : {};
-    const connect = http.request({host: proxy.hostname, port: proxy.port || 80, method: 'CONNECT', path: `${target.hostname}:${target.port || 443}`, headers: {Host: `${target.hostname}:${target.port || 443}`, ...auth}, timeout: timeoutMs});
+    const connect = http.request({host: proxy.hostname, port: proxy.port || 80, method: 'CONNECT', path: `${target.hostname}:${target.port || 443}`, headers: {Host: `${target.hostname}:${target.port || 443}`, ...auth}, agent: false});
+    const proxyError = error => { clearTimeout(timer); connect.destroy(); fail(new Error(`proxy: ${error.message || error}`)); };
+    const timer = setTimeout(() => proxyError(new Error(`нет ответа за ${Math.round(proxyTimeoutMs / 1000)} с (proxy timeout)`)), proxyTimeoutMs);
     connect.on('connect', (response, socket) => {
-      if (response.statusCode !== 200) { socket.destroy(); return reject(new Error(`proxy CONNECT ${response.statusCode}`)); }
+      clearTimeout(timer);
+      socket.on('error', error => fail(new Error(`proxy: ${error.message}`)));
+      if (response.statusCode !== 200) { socket.destroy(); return fail(new Error(`proxy CONNECT ${response.statusCode}`)); }
+      if (settled) return socket.destroy();
       finish(socket);
     });
-    connect.on('timeout', () => connect.destroy(new Error('proxy timeout')));
-    connect.on('error', reject);
+    connect.on('response', response => { response.resume(); proxyError(new Error(`CONNECT ответил ${response.statusCode}`)); });
+    connect.on('error', proxyError);
+    connect.on('close', () => { clearTimeout(timer); });
     connect.end();
   });
 }
